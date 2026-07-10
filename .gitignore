@@ -6,11 +6,12 @@ __pycache__
 .DS_Store
 .AppleDouble
 
-# docs
+docs
 *.egg-info
 .ruff_cache
 .ruff_cache
 .pytest_cache
 
+dataset
 docs
 *.parquet
