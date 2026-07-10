@@ -1,33 +1,33 @@
-"""Fetch Polymarket trade data for one or more days using SQD Portal.
+"""Fetch Polymarket OrderFilled V2 events for one or more days using SQD Portal.
 
 SQD Portal is a free, no-API-key blockchain data service that streams EVM logs.
 This script fetches ALL OrderFilled V2 events from the Polymarket CTF Exchange
-contract, decodes them, and saves to compressed parquet files.
+V2 contract, decodes them, and saves to compressed parquet files.
 
-For each day, two files are produced:
-  - polymarket_events_YYYY_MM_DD.parquet  — event metadata from Gamma API
-  - polymarket_trades_YYYY_MM_DD.parquet  — all decoded trades from SQD Portal
+For each UTC day, one file is produced:
+  - order_fills_raw_YYYY_MM_DD.parquet — every OrderFilled log (raw blockchain facts)
 
 Usage:
     uv run python project01_polymarket_db_store.py 2026-07-09
     uv run python project01_polymarket_db_store.py --start 2026-07-01 --end 2026-07-31
     uv run python project01_polymarket_db_store.py --start 2026-07-01 --end 2026-07-31 --output /data/polymarket
+    uv run python project01_polymarket_db_store.py 2026-07-09 --replace
 """
 
 from __future__ import annotations
 
 import argparse
+import sys
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import niquests
 
-from utils.constants import OUTPUT_DIR, SLUG_PREFIXES
-from utils.gamma_api import fetch_all_events_for_day, extract_token_maps
-from utils.sqd_portal import stream_decoded_logs
+from utils.constants import OUTPUT_DIR
 from utils.block_utils import estimate_block_range
-from utils.storage import save_trades, save_events
+from utils.sqd_portal import stream_decoded_logs
+from utils.storage import ensure_output_dir, open_order_fills_writer, write_order_fills_batch
 
 
 def daterange(start: str, end: str) -> list[str]:
@@ -46,69 +46,62 @@ def run_for_day(
     client: niquests.Session,
     date_str: str,
     output_dir: Path,
+    replace: bool = False,
 ) -> bool:
-    """Fetch and save all trades + events for a single day.
+    """Fetch and save all OrderFilled V2 events for a single UTC day.
 
     Returns True on success, False on failure.
     """
     print(f"\n{'=' * 60}")
-    print(f"  {date_str} — Polymarket trades via SQD Portal")
+    print(f"  {date_str} — order_fills_raw via SQD Portal")
     print(f"{'=' * 60}")
 
+    out_dir = ensure_output_dir(output_dir)
+    filename = f"order_fills_raw_{date_str.replace('-', '_')}.parquet"
+    final_path = out_dir / filename
+    temp_path = out_dir / f".tmp_{filename}"
+
+    if final_path.exists() and not replace:
+        print(f"  Already exists: {final_path} (use --replace to overwrite)")
+        return True
+
+    if temp_path.exists():
+        print(f"  Cleaning up incomplete temp file from previous run")
+        temp_path.unlink()
+
     try:
-        # Step 1: Fetch event metadata from Gamma API
-        print(f"\n--- Step 1: Fetching events from Gamma API ---")
+        # Step 1: Estimate block range from UTC midnight boundaries
+        print(f"\n--- Step 1: Estimating block range ---")
         t0 = time.time()
-        events = fetch_all_events_for_day(client, date_str, SLUG_PREFIXES)
-        t1 = time.time()
-        print(f"\n  Found {len(events)} events in {t1 - t0:.1f}s")
+        scan_start, scan_end, day_start_ts, day_end_ts = estimate_block_range(client, date_str)
+        print(f"  Estimated in {time.time() - t0:.1f}s")
 
-        if not events:
-            print("  No events found! Skipping day.")
-            return False
-
-        print(f"  First: ID={events[0].get('id')}, slug={events[0].get('slug')}")
-        print(f"  Last:  ID={events[-1].get('id')}, slug={events[-1].get('slug')}")
-
-        # Save events
-        save_events(events, date_str, output_dir)
-
-        # Extract token ID mappings
-        token_to_event, token_to_outcome = extract_token_maps(events)
-        print(f"  Extracted {len(token_to_event)} token IDs")
-
-        # Step 2: Estimate block range
-        print(f"\n--- Step 2: Estimating block range ---")
-        scan_start, scan_end = estimate_block_range(client, events, date_str)
-
-        # Step 3: Fetch + decode logs page-by-page (low memory)
-        print(f"\n--- Step 3: Fetching & decoding OrderFilled logs from SQD Portal ---")
+        # Step 2: Stream + decode + filter + write incrementally
+        print(f"\n--- Step 2: Fetching & decoding OrderFilled logs ---")
         t0 = time.time()
-        trades, total_pages = stream_decoded_logs(
-            client, scan_start, scan_end, token_to_event, token_to_outcome
-        )
-        t1 = time.time()
+        total_rows = 0
+        writer = None
 
-        matched = sum(1 for t in trades if t.get("_event_id") is not None)
-        print(f"\n  Decoded {len(trades):,} trades in {total_pages} pages ({t1 - t0:.1f}s)")
-        print(f"  Matched to events: {matched:,}")
-        print(f"  Unmatched: {len(trades) - matched:,}")
+        try:
+            for batch in stream_decoded_logs(client, scan_start, scan_end, day_start_ts, day_end_ts):
+                if writer is None:
+                    writer = open_order_fills_writer(temp_path)
+                write_order_fills_batch(writer, batch)
+                total_rows += len(batch)
+        finally:
+            if writer is not None:
+                writer.close()
 
-        # Step 5: Save trades
-        print(f"\n--- Step 5: Saving trades ---")
-        save_trades(trades, date_str, output_dir)
+        print(f"\n  Wrote {total_rows:,} order fills in {time.time() - t0:.1f}s")
 
-        # Summary
-        print(f"\n--- Summary ---")
-        print(f"  Events: {len(events)}")
-        print(f"  Trades: {len(trades):,}")
-        print(f"  Matched: {matched:,} ({matched / len(trades) * 100:.1f}%)" if trades else "  No trades")
-        print(f"  Data source: SQD Portal (free, no API key)")
+        # Step 3: Atomic rename — create empty file if no fills found
+        if total_rows == 0:
+            w = open_order_fills_writer(temp_path)
+            w.close()
+            print(f"  No order fills found for {date_str}")
 
-        # Free memory before next day
-        del trades
-        import gc as _gc
-        _gc.collect()
+        temp_path.rename(final_path)
+        print(f"  Saved to {final_path}")
 
         return True
 
@@ -116,12 +109,14 @@ def run_for_day(
         print(f"\n  ERROR for {date_str}: {exc}")
         import traceback
         traceback.print_exc()
+        if temp_path.exists():
+            temp_path.unlink()
         return False
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Fetch Polymarket trades via SQD Portal (free, no API key)."
+        description="Fetch Polymarket OrderFilled V2 events via SQD Portal."
     )
     parser.add_argument(
         "date",
@@ -129,27 +124,12 @@ def main() -> None:
         default=None,
         help="Single date in YYYY-MM-DD format",
     )
-    parser.add_argument(
-        "--start",
-        type=str,
-        default=None,
-        help="Start date for range (YYYY-MM-DD)",
-    )
-    parser.add_argument(
-        "--end",
-        type=str,
-        default=None,
-        help="End date for range (YYYY-MM-DD, inclusive)",
-    )
-    parser.add_argument(
-        "--output",
-        type=str,
-        default=None,
-        help=f"Output directory (default: {OUTPUT_DIR})",
-    )
+    parser.add_argument("--start", type=str, default=None, help="Start date (YYYY-MM-DD)")
+    parser.add_argument("--end", type=str, default=None, help="End date (YYYY-MM-DD, inclusive)")
+    parser.add_argument("--output", type=str, default=None, help=f"Output directory (default: {OUTPUT_DIR})")
+    parser.add_argument("--replace", action="store_true", help="Overwrite existing files")
     args = parser.parse_args()
 
-    # Determine dates to fetch
     if args.start and args.end:
         dates = daterange(args.start, args.end)
     elif args.date:
@@ -173,7 +153,7 @@ def main() -> None:
             print(f"  Day {i + 1}/{len(dates)}")
             print(f"{'#' * 60}")
 
-            ok = run_for_day(client, date_str, output_dir)
+            ok = run_for_day(client, date_str, output_dir, replace=args.replace)
             if ok:
                 success_count += 1
             else:
@@ -183,6 +163,9 @@ def main() -> None:
     print(f"  Complete: {success_count} succeeded, {fail_count} failed")
     print(f"  Output: {output_dir}")
     print(f"{'=' * 60}")
+
+    if fail_count > 0:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

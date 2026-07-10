@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import gc
 import time
+from collections.abc import Generator
 from datetime import UTC, datetime
 
 import niquests
@@ -11,11 +11,14 @@ import orjson
 
 from utils.constants import (
     EXCHANGE_V2,
+    EXCHANGE_V2_LOWER,
     MAX_RETRIES,
     ORDER_FILLED_TOPIC,
     RETRY_BASE_DELAY,
     SQD_DELAY,
+    SQD_MAX_BLOCKS_PER_REQUEST,
     SQD_URL,
+    WRITE_BATCH_SIZE,
 )
 
 
@@ -25,10 +28,12 @@ def decode_v2_order_filled(log: dict, block_num: int, block_ts: int) -> dict | N
     V2 OrderFilled event layout:
         Topics: [event_sig, orderHash, maker, taker]
         Data:   [side(0=BUY/1=SELL), tokenId, makerAmountFilled,
-                 takerAmountFilled, fee, ...]
+                 takerAmountFilled, fee, builder, metadata]
 
     For BUY (side=0): makerAmount=USDC(6dec), takerAmount=shares(6dec)
     For SELL (side=1): makerAmount=shares(6dec), takerAmount=USDC(6dec)
+
+    fill_role is "taker_aggregate" when taker == EXCHANGE_V2, else "maker".
     """
     topics = log.get("topics", [])
     if len(topics) < 4:
@@ -38,7 +43,7 @@ def decode_v2_order_filled(log: dict, block_num: int, block_ts: int) -> dict | N
     if data.startswith("0x"):
         data = data[2:]
     fields = [int(data[i : i + 64], 16) for i in range(0, len(data), 64)]
-    if len(fields) < 5:
+    if len(fields) < 7:
         return None
 
     side_val = fields[0]
@@ -46,6 +51,8 @@ def decode_v2_order_filled(log: dict, block_num: int, block_ts: int) -> dict | N
     maker_amount = fields[2]
     taker_amount = fields[3]
     fee = fields[4]
+    builder = "0x" + format(fields[5], "040x")[-40:]
+    metadata = "0x" + format(fields[6], "064x")
 
     if side_val == 0:
         amount_usd = maker_amount / 1e6
@@ -58,23 +65,29 @@ def decode_v2_order_filled(log: dict, block_num: int, block_ts: int) -> dict | N
     else:
         return None
 
+    taker_addr = "0x" + topics[3][26:].lower()
+    fill_role = "taker_aggregate" if taker_addr == EXCHANGE_V2_LOWER else "maker"
+
     return {
         "block_number": block_num,
-        "block_time": datetime.fromtimestamp(block_ts, tz=UTC).isoformat(),
         "timestamp": block_ts,
+        "block_time": datetime.fromtimestamp(block_ts, tz=UTC).isoformat(),
         "tx_hash": log.get("transactionHash"),
         "log_index": log.get("logIndex"),
         "order_hash": topics[1],
         "maker": "0x" + topics[2][26:],
         "taker": "0x" + topics[3][26:],
+        "fill_role": fill_role,
         "side": "BUY" if side_val == 0 else "SELL",
         "token_id": str(token_id),
+        "maker_amount_raw": str(maker_amount),
+        "taker_amount_raw": str(taker_amount),
+        "fee": str(fee),
+        "builder": builder,
+        "metadata": metadata,
         "amount_usd": amount_usd,
         "shares": shares,
         "price": price,
-        "maker_amount_raw": maker_amount,
-        "taker_amount_raw": taker_amount,
-        "fee": fee,
     }
 
 
@@ -82,10 +95,12 @@ def fetch_sqd_page(
     client: niquests.Session,
     from_block: int,
     to_block: int,
-) -> list[tuple[dict, int, int]]:
+) -> tuple[list[tuple[dict, int, int]], int]:
     """Fetch one page of logs from SQD Portal.
 
-    Returns list of (log, block_num, block_ts).
+    Streams the HTTP response line-by-line to avoid loading the entire
+    body into memory. Returns (logs, parse_failures) where logs is a list
+    of (log, block_num, block_ts) tuples.
     """
     payload = {
         "type": "evm",
@@ -123,79 +138,94 @@ def fetch_sqd_page(
                 raise
 
     results: list[tuple[dict, int, int]] = []
-    for line in resp.content.strip().split(b"\n"):
-        if not line:
-            continue
-        try:
-            obj = orjson.loads(line)
-        except Exception:
-            continue
-        if "header" not in obj:
-            continue
-        block_num = obj["header"]["number"]
-        block_ts = obj["header"]["timestamp"]
-        for log in obj.get("logs", []):
-            results.append((log, block_num, block_ts))
-    return results
+    parse_failures = 0
+
+    try:
+        for line in resp.iter_lines():
+            if not line:
+                continue
+            try:
+                obj = orjson.loads(line)
+            except Exception:
+                parse_failures += 1
+                continue
+            if "header" not in obj:
+                continue
+            block_num = obj["header"]["number"]
+            block_ts = obj["header"]["timestamp"]
+            for log in obj.get("logs", []):
+                results.append((log, block_num, block_ts))
+    finally:
+        resp.close()
+
+    return results, parse_failures
 
 
 def stream_decoded_logs(
     client: niquests.Session,
     start_block: int,
     end_block: int,
-    token_to_event: dict[int, int],
-    token_to_outcome: dict[int, str],
-    max_per_request: int = 10000,
-) -> tuple[list[dict], int]:
-    """Fetch and decode logs page-by-page to minimize memory usage.
+    day_start_ts: int,
+    day_end_ts: int,
+    batch_size: int = WRITE_BATCH_SIZE,
+) -> Generator[list[dict], None, None]:
+    """Fetch and decode OrderFilled logs, yielding batches of filtered rows.
 
-    Instead of storing all raw logs + all decoded trades in memory,
-    this decodes each page immediately and only keeps the decoded trades.
-    Raw page data is freed after each page is processed.
-
-    Returns (decoded_trades, total_pages).
+    - Pages through SQD Portal block-by-block.
+    - Filters by timestamp [day_start_ts, day_end_ts) to enforce exact UTC day.
+    - Deduplicates by (tx_hash, log_index).
+    - Yields batches of up to batch_size decoded rows for incremental writing.
     """
-    token_id_set = set(token_to_event.keys())
-    decoded: list[dict] = []
+    seen: set[tuple[str, int]] = set()
+    batch: list[dict] = []
     current = start_block
     page = 0
+    total_decoded = 0
 
     while current <= end_block:
-        to_block = min(current + max_per_request - 1, end_block)
-        raw_logs = fetch_sqd_page(client, current, to_block)
+        to_block = min(current + SQD_MAX_BLOCKS_PER_REQUEST - 1, end_block)
+        raw_logs, parse_failures = fetch_sqd_page(client, current, to_block)
 
         page += 1
+        if parse_failures:
+            print(f"  [page {page}] WARNING: {parse_failures} unparseable lines")
+
         if not raw_logs:
-            print(f"  [page {page}] blocks {current}-{to_block}: 0 logs (empty)")
+            print(f"  [page {page}] blocks {current}-{to_block}: 0 logs")
             current = to_block + 1
+            time.sleep(SQD_DELAY)
             continue
 
         page_decoded = 0
         for log, block_num, block_ts in raw_logs:
+            if block_ts < day_start_ts or block_ts >= day_end_ts:
+                continue
+
             trade = decode_v2_order_filled(log, block_num, block_ts)
             if trade is None:
                 continue
 
-            token_int = int(trade["token_id"])
-            if token_int in token_id_set:
-                trade["_event_id"] = token_to_event[token_int]
-                trade["outcome"] = token_to_outcome.get(token_int, "")
-            else:
-                trade["_event_id"] = None
-                trade["outcome"] = None
+            key = (trade["tx_hash"], trade["log_index"])
+            if key in seen:
+                continue
+            seen.add(key)
 
-            decoded.append(trade)
+            batch.append(trade)
             page_decoded += 1
+            total_decoded += 1
+
+            if len(batch) >= batch_size:
+                yield batch
+                batch = []
 
         last_block = raw_logs[-1][1]
         print(
-            f"  [page {page}] blocks {current}-{to_block}: {page_decoded} trades "
-            f"(last block: {last_block}, total: {len(decoded):,})"
+            f"  [page {page}] blocks {current}-{to_block}: {page_decoded} fills "
+            f"(total: {total_decoded:,})"
         )
         del raw_logs
-        if page % 10 == 0:
-            gc.collect()
         current = last_block + 1
         time.sleep(SQD_DELAY)
 
-    return decoded, page
+    if batch:
+        yield batch

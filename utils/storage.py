@@ -1,83 +1,55 @@
-"""Polymarket SQD Portal data fetcher — parquet storage with zstd compression."""
+"""Polymarket SQD Portal data fetcher — parquet storage for order_fills_raw."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-import polars as pl
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from utils.constants import OUTPUT_DIR, PARQUET_COMPRESSION, PARQUET_COMPRESSION_LEVEL
 
+ORDER_FILLS_SCHEMA = pa.schema([
+    pa.field("block_number", pa.int64()),
+    pa.field("timestamp", pa.int64()),
+    pa.field("block_time", pa.string()),
+    pa.field("tx_hash", pa.string()),
+    pa.field("log_index", pa.int32()),
+    pa.field("order_hash", pa.string()),
+    pa.field("maker", pa.string()),
+    pa.field("taker", pa.string()),
+    pa.field("fill_role", pa.string()),
+    pa.field("side", pa.string()),
+    pa.field("token_id", pa.string()),
+    pa.field("maker_amount_raw", pa.string()),
+    pa.field("taker_amount_raw", pa.string()),
+    pa.field("fee", pa.string()),
+    pa.field("builder", pa.string()),
+    pa.field("metadata", pa.string()),
+    pa.field("amount_usd", pa.float64()),
+    pa.field("shares", pa.float64()),
+    pa.field("price", pa.float64()),
+])
 
-def _ensure_output_dir(output_dir: Path | None = None) -> Path:
+
+def ensure_output_dir(output_dir: Path | None = None) -> Path:
     """Create and return the output directory."""
     target_dir = output_dir or OUTPUT_DIR
     target_dir.mkdir(parents=True, exist_ok=True)
     return target_dir
 
 
-def _add_datetime_column(df: pl.DataFrame) -> pl.DataFrame:
-    """Add a datetime column from the Unix timestamp column if present."""
-    if "timestamp" in df.columns:
-        return df.with_columns(
-            pl.from_epoch(pl.col("timestamp").cast(pl.Int64), time_unit="s")
-            .cast(pl.Datetime("us"))
-            .alias("datetime")
-        )
-    return df
-
-
-def save_trades(
-    trades: list[dict],
-    date_str: str,
-    output_dir: Path | None = None,
-) -> Path | None:
-    """Save decoded trades to a parquet file with zstd compression.
-
-    File name: polymarket_trades_YYYY_MM_DD.parquet
-    Returns the path to the saved file, or None if no trades.
-    """
-    if not trades:
-        print("  No trades to save!")
-        return None
-
-    out_dir = _ensure_output_dir(output_dir)
-    df = _add_datetime_column(pl.DataFrame(trades))
-
-    filename = f"polymarket_trades_{date_str.replace('-', '_')}.parquet"
-    filepath = out_dir / filename
-    df.write_parquet(
-        filepath,
+def open_order_fills_writer(path: Path) -> pq.ParquetWriter:
+    """Open a ParquetWriter for incremental order_fills_raw writes."""
+    return pq.ParquetWriter(
+        str(path),
+        ORDER_FILLS_SCHEMA,
         compression=PARQUET_COMPRESSION,
         compression_level=PARQUET_COMPRESSION_LEVEL,
     )
-    print(f"  Saved {len(trades)} trades to {filepath}")
-    return filepath
 
 
-def save_events(
-    events: list[dict],
-    date_str: str,
-    output_dir: Path | None = None,
-) -> Path | None:
-    """Save event metadata to a parquet file with zstd compression.
-
-    File name: polymarket_events_YYYY_MM_DD.parquet
-    Returns the path to the saved file, or None if no events.
-    """
-    if not events:
-        print("  No events to save!")
-        return None
-
-    out_dir = _ensure_output_dir(output_dir)
-    df = pl.DataFrame(events)
-
-    filename = f"polymarket_events_{date_str.replace('-', '_')}.parquet"
-    filepath = out_dir / filename
-    df.write_parquet(
-        filepath,
-        compression=PARQUET_COMPRESSION,
-        compression_level=PARQUET_COMPRESSION_LEVEL,
-    )
-    print(f"  Saved {len(events)} events to {filepath}")
-    return filepath
+def write_order_fills_batch(writer: pq.ParquetWriter, batch: list[dict]) -> None:
+    """Write a batch of order fill dicts to the parquet writer."""
+    table = pa.Table.from_pylist(batch, schema=ORDER_FILLS_SCHEMA)
+    writer.write_table(table)
