@@ -1,4 +1,4 @@
-"""Polymarket SQD Portal data fetcher — SQD Portal log fetching and V2 event decoding."""
+"""SQD Portal log fetching and V2 OrderFilled event decoding."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 import niquests
 import orjson
 
-from utils.constants import (
+from poly_data_storage.constants import (
     EXCHANGE_V2,
     EXCHANGE_V2_LOWER,
     MAX_RETRIES,
@@ -126,7 +126,7 @@ def fetch_sqd_page(
 
     for attempt in range(MAX_RETRIES):
         try:
-            resp = client.post(SQD_URL, json=payload, timeout=120.0)
+            resp = client.post(SQD_URL, json=payload, timeout=120.0, stream=True)
             resp.raise_for_status()
             break
         except Exception as exc:

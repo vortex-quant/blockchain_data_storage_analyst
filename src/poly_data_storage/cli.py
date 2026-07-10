@@ -1,17 +1,13 @@
-"""Fetch Polymarket OrderFilled V2 events for one or more days using SQD Portal.
-
-SQD Portal is a free, no-API-key blockchain data service that streams EVM logs.
-This script fetches ALL OrderFilled V2 events from the Polymarket CTF Exchange
-V2 contract, decodes them, and saves to compressed parquet files.
+"""CLI entry point — fetch Polymarket OrderFilled V2 events via SQD Portal.
 
 For each UTC day, one file is produced:
-  - order_fills_raw_YYYY_MM_DD.parquet — every OrderFilled log (raw blockchain facts)
+  polymarket_orders_YYYY_MM_DD.parquet — every OrderFilled log (raw blockchain facts)
 
 Usage:
-    uv run python project01_polymarket_db_store.py 2026-07-09
-    uv run python project01_polymarket_db_store.py --start 2026-07-01 --end 2026-07-31
-    uv run python project01_polymarket_db_store.py --start 2026-07-01 --end 2026-07-31 --output /data/polymarket
-    uv run python project01_polymarket_db_store.py 2026-07-09 --replace
+    poly-fetch 2026-07-09
+    poly-fetch --start 2026-07-01 --end 2026-07-31
+    poly-fetch --start 2026-07-01 --end 2026-07-31 --output /data/polymarket
+    poly-fetch 2026-07-09 --replace
 """
 
 from __future__ import annotations
@@ -24,10 +20,10 @@ from pathlib import Path
 
 import niquests
 
-from utils.constants import OUTPUT_DIR
-from utils.block_utils import estimate_block_range
-from utils.sqd_portal import stream_decoded_logs
-from utils.storage import ensure_output_dir, open_order_fills_writer, write_order_fills_batch
+from poly_data_storage.constants import OUTPUT_DIR
+from poly_data_storage.block_utils import estimate_block_range
+from poly_data_storage.sqd_portal import stream_decoded_logs
+from poly_data_storage.storage import ensure_output_dir, open_order_fills_writer, write_order_fills_batch
 
 
 def daterange(start: str, end: str) -> list[str]:
@@ -53,11 +49,11 @@ def run_for_day(
     Returns True on success, False on failure.
     """
     print(f"\n{'=' * 60}")
-    print(f"  {date_str} — order_fills_raw via SQD Portal")
+    print(f"  {date_str} — polymarket_orders via SQD Portal")
     print(f"{'=' * 60}")
 
     out_dir = ensure_output_dir(output_dir)
-    filename = f"order_fills_raw_{date_str.replace('-', '_')}.parquet"
+    filename = f"polymarket_orders_{date_str.replace('-', '_')}.parquet"
     final_path = out_dir / filename
     temp_path = out_dir / f".tmp_{filename}"
 
@@ -116,7 +112,8 @@ def run_for_day(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Fetch Polymarket OrderFilled V2 events via SQD Portal."
+        prog="poly-fetch",
+        description="Fetch Polymarket OrderFilled V2 events via SQD Portal.",
     )
     parser.add_argument(
         "date",
@@ -166,7 +163,3 @@ def main() -> None:
 
     if fail_count > 0:
         sys.exit(1)
-
-
-if __name__ == "__main__":
-    main()

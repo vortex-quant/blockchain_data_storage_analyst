@@ -1,4 +1,4 @@
-"""Polymarket SQD Portal data fetcher — parquet storage for order_fills_raw."""
+"""Parquet storage for polymarket_orders — streaming writes via pyarrow."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from utils.constants import OUTPUT_DIR, PARQUET_COMPRESSION, PARQUET_COMPRESSION_LEVEL
+from poly_data_storage.constants import PARQUET_COMPRESSION, PARQUET_COMPRESSION_LEVEL
 
 ORDER_FILLS_SCHEMA = pa.schema([
     pa.field("block_number", pa.int64()),
@@ -32,15 +32,14 @@ ORDER_FILLS_SCHEMA = pa.schema([
 ])
 
 
-def ensure_output_dir(output_dir: Path | None = None) -> Path:
+def ensure_output_dir(output_dir: Path) -> Path:
     """Create and return the output directory."""
-    target_dir = output_dir or OUTPUT_DIR
-    target_dir.mkdir(parents=True, exist_ok=True)
-    return target_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return output_dir
 
 
 def open_order_fills_writer(path: Path) -> pq.ParquetWriter:
-    """Open a ParquetWriter for incremental order_fills_raw writes."""
+    """Open a ParquetWriter for incremental order fills writes."""
     return pq.ParquetWriter(
         str(path),
         ORDER_FILLS_SCHEMA,
