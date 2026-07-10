@@ -12,7 +12,7 @@ GAMMA_BASE = "https://gamma-api.polymarket.com"
 
 GAMMA_TAG_SLUG = "crypto"
 GAMMA_RELATED_TAGS = True
-GAMMA_PAGE_SIZE = 500  # max per page (API caps at 500)
+GAMMA_PAGE_SIZE = 100  # API silently caps at 100 per page
 GAMMA_DELAY = 0.1  # ~30 req/sec sustained is safe
 MAX_RETRIES = 5
 RETRY_BASE_DELAY = 1.0

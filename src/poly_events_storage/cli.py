@@ -114,8 +114,8 @@ def main() -> None:
         default=None,
         help="Single date in YYYY-MM-DD format",
     )
-    parser.add_argument("--start", type=str, required=True, help="Start date (YYYY-MM-DD)")
-    parser.add_argument("--end", type=str, required=True, help="End date (YYYY-MM-DD, inclusive)")
+    parser.add_argument("--start", type=str, default=None, help="Start date (YYYY-MM-DD)")
+    parser.add_argument("--end", type=str, default=None, help="End date (YYYY-MM-DD, inclusive)")
     parser.add_argument("--output", type=str, default=None, help=f"Output directory (default: {OUTPUT_DIR})")
     parser.add_argument("--replace", action="store_true", help="Overwrite existing files")
     args = parser.parse_args()

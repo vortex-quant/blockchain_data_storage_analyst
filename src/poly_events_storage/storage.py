@@ -13,26 +13,27 @@ from poly_events_storage.constants import PARQUET_COMPRESSION, PARQUET_COMPRESSI
 EVENTS_SCHEMA = pa.schema([
     pa.field("id", pa.int64()),
     pa.field("slug", pa.string()),
+    pa.field("ticker", pa.string()),
     pa.field("title", pa.string()),
     pa.field("description", pa.string()),
-    pa.field("category", pa.string()),
     pa.field("startDate", pa.string()),
+    pa.field("creationDate", pa.string()),
     pa.field("endDate", pa.string()),
     pa.field("closedTime", pa.string()),
     pa.field("active", pa.bool_()),
     pa.field("closed", pa.bool_()),
     pa.field("archived", pa.bool_()),
+    pa.field("restricted", pa.bool_()),
+    pa.field("negRisk", pa.bool_()),
+    pa.field("enableNegRisk", pa.bool_()),
     pa.field("volume", pa.float64()),
     pa.field("volume24hr", pa.float64()),
-    pa.field("volumeNum", pa.float64()),
-    pa.field("liquidity", pa.float64()),
-    pa.field("liquidityNum", pa.float64()),
+    pa.field("openInterest", pa.float64()),
+    pa.field("commentCount", pa.int32()),
     pa.field("tags", pa.string()),
     pa.field("markets", pa.string()),
     pa.field("createdAt", pa.string()),
     pa.field("updatedAt", pa.string()),
-    pa.field("image", pa.string()),
-    pa.field("icon", pa.string()),
 ])
 
 
@@ -45,31 +46,59 @@ def _serialize(value) -> str:
     return orjson.dumps(value).decode()
 
 
+def _to_int(value, default=0):
+    """Convert a value to int, handling string-encoded integers."""
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _to_float(value, default=0.0):
+    """Convert a value to float, handling string-encoded floats."""
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def flatten_event(event: dict) -> dict:
-    """Flatten a raw Gamma API event dict to match EVENTS_SCHEMA."""
+    """Flatten a raw Gamma API event dict to match EVENTS_SCHEMA.
+
+    The `markets` field is serialized as a JSON string preserving all
+    market-level data including conditionId, clobTokenIds, questionID,
+    outcomes, outcomePrices — needed for future matching with App A
+    order fills by token_id.
+    The `tags` field is similarly serialized as a JSON string.
+    """
     return {
-        "id": event.get("id"),
+        "id": _to_int(event.get("id")),
         "slug": event.get("slug"),
+        "ticker": event.get("ticker"),
         "title": event.get("title"),
         "description": event.get("description"),
-        "category": event.get("category"),
         "startDate": event.get("startDate"),
+        "creationDate": event.get("creationDate"),
         "endDate": event.get("endDate"),
         "closedTime": event.get("closedTime"),
         "active": event.get("active"),
         "closed": event.get("closed"),
         "archived": event.get("archived"),
-        "volume": event.get("volume"),
-        "volume24hr": event.get("volume24hr"),
-        "volumeNum": event.get("volumeNum"),
-        "liquidity": event.get("liquidity"),
-        "liquidityNum": event.get("liquidityNum"),
+        "restricted": event.get("restricted"),
+        "negRisk": event.get("negRisk"),
+        "enableNegRisk": event.get("enableNegRisk"),
+        "volume": _to_float(event.get("volume")),
+        "volume24hr": _to_float(event.get("volume24hr")),
+        "openInterest": _to_float(event.get("openInterest")),
+        "commentCount": _to_int(event.get("commentCount")),
         "tags": _serialize(event.get("tags")),
         "markets": _serialize(event.get("markets")),
         "createdAt": event.get("createdAt"),
         "updatedAt": event.get("updatedAt"),
-        "image": event.get("image"),
-        "icon": event.get("icon"),
     }
 
 
