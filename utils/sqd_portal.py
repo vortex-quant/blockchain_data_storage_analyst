@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import time
 from datetime import UTC, datetime
 
@@ -122,7 +123,7 @@ def fetch_sqd_page(
                 raise
 
     results: list[tuple[dict, int, int]] = []
-    for line in resp.text.strip().split("\n"):
+    for line in resp.content.strip().split(b"\n"):
         if not line:
             continue
         try:
@@ -138,70 +139,63 @@ def fetch_sqd_page(
     return results
 
 
-def fetch_all_sqd_logs(
+def stream_decoded_logs(
     client: niquests.Session,
     start_block: int,
     end_block: int,
+    token_to_event: dict[int, int],
+    token_to_outcome: dict[int, str],
     max_per_request: int = 10000,
-) -> list[tuple[dict, int, int]]:
-    """Fetch all logs in a block range, handling SQD Portal pagination.
+) -> tuple[list[dict], int]:
+    """Fetch and decode logs page-by-page to minimize memory usage.
 
-    SQD Portal returns a variable number of blocks per response.
-    We paginate by using the last returned block + 1.
+    Instead of storing all raw logs + all decoded trades in memory,
+    this decodes each page immediately and only keeps the decoded trades.
+    Raw page data is freed after each page is processed.
+
+    Returns (decoded_trades, total_pages).
     """
-    all_logs: list[tuple[dict, int, int]] = []
+    token_id_set = set(token_to_event.keys())
+    decoded: list[dict] = []
     current = start_block
     page = 0
 
     while current <= end_block:
         to_block = min(current + max_per_request - 1, end_block)
-        logs = fetch_sqd_page(client, current, to_block)
+        raw_logs = fetch_sqd_page(client, current, to_block)
 
         page += 1
-        if not logs:
+        if not raw_logs:
             print(f"  [page {page}] blocks {current}-{to_block}: 0 logs (empty)")
             current = to_block + 1
             continue
 
-        all_logs.extend(logs)
-        last_block = logs[-1][1]
+        page_decoded = 0
+        for log, block_num, block_ts in raw_logs:
+            trade = decode_v2_order_filled(log, block_num, block_ts)
+            if trade is None:
+                continue
+
+            token_int = int(trade["token_id"])
+            if token_int in token_id_set:
+                trade["_event_id"] = token_to_event[token_int]
+                trade["outcome"] = token_to_outcome.get(token_int, "")
+            else:
+                trade["_event_id"] = None
+                trade["outcome"] = None
+
+            decoded.append(trade)
+            page_decoded += 1
+
+        last_block = raw_logs[-1][1]
         print(
-            f"  [page {page}] blocks {current}-{to_block}: {len(logs)} logs "
-            f"(last block: {last_block}, total: {len(all_logs)})"
+            f"  [page {page}] blocks {current}-{to_block}: {page_decoded} trades "
+            f"(last block: {last_block}, total: {len(decoded):,})"
         )
+        del raw_logs
+        if page % 10 == 0:
+            gc.collect()
         current = last_block + 1
         time.sleep(SQD_DELAY)
 
-    return all_logs
-
-
-def decode_all_logs(
-    raw_logs: list[tuple[dict, int, int]],
-    token_to_event: dict[int, int],
-    token_to_outcome: dict[int, str],
-) -> list[dict]:
-    """Decode all raw logs and annotate with event_id and outcome where matched.
-
-    Returns list of decoded trade dicts. Every decoded trade is included
-    (not just those matching known token IDs). Matched trades get
-    _event_id and outcome fields populated.
-    """
-    token_id_set = set(token_to_event.keys())
-    decoded: list[dict] = []
-
-    for log, block_num, block_ts in raw_logs:
-        trade = decode_v2_order_filled(log, block_num, block_ts)
-        if trade is None:
-            continue
-
-        token_int = int(trade["token_id"])
-        if token_int in token_id_set:
-            trade["_event_id"] = token_to_event[token_int]
-            trade["outcome"] = token_to_outcome.get(token_int, "")
-        else:
-            trade["_event_id"] = None
-            trade["outcome"] = None
-
-        decoded.append(trade)
-
-    return decoded
+    return decoded, page

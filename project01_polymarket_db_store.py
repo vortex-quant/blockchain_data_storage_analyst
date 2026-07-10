@@ -25,7 +25,7 @@ import niquests
 
 from utils.constants import OUTPUT_DIR, SLUG_PREFIXES
 from utils.gamma_api import fetch_all_events_for_day, extract_token_maps
-from utils.sqd_portal import fetch_all_sqd_logs, decode_all_logs
+from utils.sqd_portal import stream_decoded_logs
 from utils.block_utils import estimate_block_range
 from utils.storage import save_trades, save_events
 
@@ -81,21 +81,16 @@ def run_for_day(
         print(f"\n--- Step 2: Estimating block range ---")
         scan_start, scan_end = estimate_block_range(client, events, date_str)
 
-        # Step 3: Fetch ALL OrderFilled logs from SQD Portal
-        print(f"\n--- Step 3: Fetching OrderFilled logs from SQD Portal ---")
+        # Step 3: Fetch + decode logs page-by-page (low memory)
+        print(f"\n--- Step 3: Fetching & decoding OrderFilled logs from SQD Portal ---")
         t0 = time.time()
-        raw_logs = fetch_all_sqd_logs(client, scan_start, scan_end)
-        t1 = time.time()
-        print(f"\n  Fetched {len(raw_logs):,} logs in {t1 - t0:.1f}s")
-
-        # Step 4: Decode all logs
-        print(f"\n--- Step 4: Decoding logs ---")
-        t0 = time.time()
-        trades = decode_all_logs(raw_logs, token_to_event, token_to_outcome)
+        trades, total_pages = stream_decoded_logs(
+            client, scan_start, scan_end, token_to_event, token_to_outcome
+        )
         t1 = time.time()
 
         matched = sum(1 for t in trades if t.get("_event_id") is not None)
-        print(f"  Decoded {len(trades):,} trades in {t1 - t0:.1f}s")
+        print(f"\n  Decoded {len(trades):,} trades in {total_pages} pages ({t1 - t0:.1f}s)")
         print(f"  Matched to events: {matched:,}")
         print(f"  Unmatched: {len(trades) - matched:,}")
 
@@ -109,6 +104,11 @@ def run_for_day(
         print(f"  Trades: {len(trades):,}")
         print(f"  Matched: {matched:,} ({matched / len(trades) * 100:.1f}%)" if trades else "  No trades")
         print(f"  Data source: SQD Portal (free, no API key)")
+
+        # Free memory before next day
+        del trades
+        import gc as _gc
+        _gc.collect()
 
         return True
 
