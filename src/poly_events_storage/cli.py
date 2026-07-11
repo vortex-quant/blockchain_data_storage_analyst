@@ -77,13 +77,14 @@ def run_for_day(
         # Step 2: Write to parquet
         print(f"\n--- Step 2: Writing parquet ---")
         writer = open_events_writer(temp_path)
+        total_rows = 0
         try:
             if events:
-                write_events_batch(writer, events)
+                total_rows = write_events_batch(writer, events)
         finally:
             writer.close()
 
-        print(f"  Wrote {len(events)} events")
+        print(f"  Wrote {total_rows} rows ({len(events)} events)")
 
         # Step 3: Atomic rename
         if not events:
