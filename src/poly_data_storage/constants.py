@@ -7,7 +7,18 @@ from pathlib import Path
 # ── Network endpoints ─────────────────────────────────────────────────────────
 
 SQD_URL = "https://portal.sqd.dev/datasets/polygon-mainnet/stream"
-POLYGON_RPC_URL = "https://polygon-rpc.com"
+
+# Alchemy RPC (primary) — API key loaded from keys.env at runtime.
+# Used for block range estimation only; main data fetch uses SQD Portal.
+ALCHEMY_API_KEY_ENV = "ALCHEMY_API_KEY"
+ALCHEMY_POLYGON_RPC = "https://polygon-mainnet.g.alchemy.com/v2/{key}"
+
+# Free Polygon RPC endpoints — fallback if Alchemy is unavailable.
+POLYGON_RPC_FALLBACKS = [
+    "https://polygon-bor-rpc.publicnode.com",
+    "https://polygon.drpc.org",
+    "https://1rpc.io/matic",
+]
 
 # ── Contract constants ────────────────────────────────────────────────────────
 
