@@ -7,6 +7,7 @@ from pathlib import Path
 # ── Network endpoints ─────────────────────────────────────────────────────────
 
 SQD_URL = "https://portal.sqd.dev/datasets/polygon-mainnet/stream"
+SQD_TIMESTAMP_URL = "https://portal.sqd.dev/datasets/polygon-mainnet/timestamps/{ts}/block"
 
 # Alchemy RPC (primary) — API key loaded from keys.env at runtime.
 # Used for block range estimation only; main data fetch uses SQD Portal.
@@ -32,9 +33,8 @@ SQD_DELAY = 0.55  # 20 req / 10 sec → 0.5s min, 0.55s for safety
 MAX_RETRIES = 5
 RETRY_BASE_DELAY = 1.0
 
-POLYGON_BLOCK_TIME = 2.0  # seconds per block (Polygon ~2s)
-BLOCK_BUFFER_BASE = 5_000  # base buffer for block range estimation
-BLOCK_BUFFER_PER_DAY = 1_500  # extra buffer per day of distance from latest block
+POLYGON_BLOCK_TIME = 2.0  # seconds per block (used in RPC fallback only)
+BLOCK_BUFFER_BASE = 5_000  # search window for RPC binary search fallback
 
 # ── Storage ───────────────────────────────────────────────────────────────────
 
@@ -46,3 +46,4 @@ WRITE_BATCH_SIZE = 50_000  # rows per batch for streaming parquet writes
 # ── SQD Portal ────────────────────────────────────────────────────────────────
 
 SQD_MAX_BLOCKS_PER_REQUEST = 10_000
+SQD_MIN_BLOCKS_PER_REQUEST = 500  # floor for adaptive splitting on stream resets

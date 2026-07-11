@@ -36,7 +36,12 @@ uv run poly-fetch 2026-07-09
 uv run poly-fetch --start 2026-07-01 --end 2026-07-31
 
 # Fetch events for a date range to a custom directory
-uv run poly-events --start 2026-07-01 --end 2026-07-31 --output /data/polymarket
+uv run poly-events --start 2026-07-10 --end 2026-07-11 --output /mnt/volume1/vol_poly
+uv run poly-fetch --start 2026-07-11 --end 2026-07-11 --output ./test/
+
+/home/ubuntu/projects/project_poly
+
+/mnt/volume1/vol_poly
 
 # Overwrite existing files
 uv run poly-events --start 2026-07-09 --end 2026-07-09 --replace

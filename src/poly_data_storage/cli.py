@@ -22,8 +22,11 @@ import niquests
 
 from poly_data_storage.constants import OUTPUT_DIR
 from poly_data_storage.block_utils import estimate_block_range
+from poly_data_storage.logger import get_logger
 from poly_data_storage.sqd_portal import stream_decoded_logs
 from poly_data_storage.storage import ensure_output_dir, open_order_fills_writer, write_order_fills_batch
+
+log = get_logger()
 
 
 def daterange(start: str, end: str) -> list[str]:
@@ -48,9 +51,9 @@ def run_for_day(
 
     Returns True on success, False on failure.
     """
-    print(f"\n{'=' * 60}")
-    print(f"  {date_str} — polymarket_orders via SQD Portal")
-    print(f"{'=' * 60}")
+    log.info(f"\n{'=' * 60}")
+    log.info(f"  {date_str} — polymarket_orders via SQD Portal")
+    log.info(f"{'=' * 60}")
 
     out_dir = ensure_output_dir(output_dir)
     filename = f"polymarket_orders_{date_str.replace('-', '_')}.parquet"
@@ -58,22 +61,22 @@ def run_for_day(
     temp_path = out_dir / f".tmp_{filename}"
 
     if final_path.exists() and not replace:
-        print(f"  Already exists: {final_path} (use --replace to overwrite)")
+        log.info(f"  Already exists: {final_path} (use --replace to overwrite)")
         return True
 
     if temp_path.exists():
-        print(f"  Cleaning up incomplete temp file from previous run")
+        log.info(f"  Cleaning up incomplete temp file from previous run")
         temp_path.unlink()
 
     try:
         # Step 1: Estimate block range from UTC midnight boundaries
-        print(f"\n--- Step 1: Estimating block range ---")
+        log.info(f"\n--- Step 1: Estimating block range ---")
         t0 = time.time()
         scan_start, scan_end, day_start_ts, day_end_ts = estimate_block_range(client, date_str)
-        print(f"  Estimated in {time.time() - t0:.1f}s")
+        log.info(f"  Estimated in {time.time() - t0:.1f}s")
 
         # Step 2: Stream + decode + filter + write incrementally
-        print(f"\n--- Step 2: Fetching & decoding OrderFilled logs ---")
+        log.info(f"\n--- Step 2: Fetching & decoding OrderFilled logs ---")
         t0 = time.time()
         total_rows = 0
         writer = None
@@ -88,23 +91,23 @@ def run_for_day(
             if writer is not None:
                 writer.close()
 
-        print(f"\n  Wrote {total_rows:,} order fills in {time.time() - t0:.1f}s")
+        log.info(f"\n  Wrote {total_rows:,} order fills in {time.time() - t0:.1f}s")
 
         # Step 3: Atomic rename — create empty file if no fills found
         if total_rows == 0:
             w = open_order_fills_writer(temp_path)
             w.close()
-            print(f"  No order fills found for {date_str}")
+            log.info(f"  No order fills found for {date_str}")
 
         temp_path.rename(final_path)
-        print(f"  Saved to {final_path}")
+        log.info(f"  Saved to {final_path}")
 
         return True
 
     except Exception as exc:
-        print(f"\n  ERROR for {date_str}: {exc}")
+        log.info(f"\n  ERROR for {date_str}: {exc}")
         import traceback
-        traceback.print_exc()
+        log.info(traceback.format_exc())
         if temp_path.exists():
             temp_path.unlink()
         return False
@@ -136,19 +139,19 @@ def main() -> None:
 
     output_dir = Path(args.output) if args.output else OUTPUT_DIR
 
-    print(f"\n  Dates to fetch: {len(dates)}")
-    print(f"  Output directory: {output_dir}")
+    log.info(f"\n  Dates to fetch: {len(dates)}")
+    log.info(f"  Output directory: {output_dir}")
     if len(dates) > 1:
-        print(f"  Range: {dates[0]} to {dates[-1]}")
+        log.info(f"  Range: {dates[0]} to {dates[-1]}")
 
     success_count = 0
     fail_count = 0
 
     with niquests.Session() as client:
         for i, date_str in enumerate(dates):
-            print(f"\n{'#' * 60}")
-            print(f"  Day {i + 1}/{len(dates)}")
-            print(f"{'#' * 60}")
+            log.info(f"\n{'#' * 60}")
+            log.info(f"  Day {i + 1}/{len(dates)}")
+            log.info(f"{'#' * 60}")
 
             ok = run_for_day(client, date_str, output_dir, replace=args.replace)
             if ok:
@@ -156,10 +159,10 @@ def main() -> None:
             else:
                 fail_count += 1
 
-    print(f"\n{'=' * 60}")
-    print(f"  Complete: {success_count} succeeded, {fail_count} failed")
-    print(f"  Output: {output_dir}")
-    print(f"{'=' * 60}")
+    log.info(f"\n{'=' * 60}")
+    log.info(f"  Complete: {success_count} succeeded, {fail_count} failed")
+    log.info(f"  Output: {output_dir}")
+    log.info(f"{'=' * 60}")
 
     if fail_count > 0:
         sys.exit(1)
