@@ -20,11 +20,15 @@ from pathlib import Path
 
 import niquests
 
-from poly_data_storage.constants import OUTPUT_DIR
 from poly_data_storage.block_utils import estimate_block_range
+from poly_data_storage.constants import OUTPUT_DIR
 from poly_data_storage.logger import get_logger
 from poly_data_storage.sqd_portal import stream_decoded_logs
-from poly_data_storage.storage import ensure_output_dir, open_order_fills_writer, write_order_fills_batch
+from poly_data_storage.storage import (
+    ensure_output_dir,
+    open_order_fills_writer,
+    write_order_fills_batch,
+)
 
 log = get_logger()
 
@@ -65,24 +69,28 @@ def run_for_day(
         return True
 
     if temp_path.exists():
-        log.info(f"  Cleaning up incomplete temp file from previous run")
+        log.info("  Cleaning up incomplete temp file from previous run")
         temp_path.unlink()
 
     try:
         # Step 1: Estimate block range from UTC midnight boundaries
-        log.info(f"\n--- Step 1: Estimating block range ---")
+        log.info("\n--- Step 1: Resolving block range ---")
         t0 = time.time()
-        scan_start, scan_end, day_start_ts, day_end_ts = estimate_block_range(client, date_str)
-        log.info(f"  Estimated in {time.time() - t0:.1f}s")
+        scan_start, scan_end, day_start_ts, day_end_ts = estimate_block_range(
+            client, date_str
+        )
+        log.info(f"  Resolved in {time.time() - t0:.1f}s")
 
         # Step 2: Stream + decode + filter + write incrementally
-        log.info(f"\n--- Step 2: Fetching & decoding OrderFilled logs ---")
+        log.info("\n--- Step 2: Fetching & decoding OrderFilled logs ---")
         t0 = time.time()
         total_rows = 0
         writer = None
 
         try:
-            for batch in stream_decoded_logs(client, scan_start, scan_end, day_start_ts, day_end_ts):
+            for batch in stream_decoded_logs(
+                client, scan_start, scan_end, day_start_ts, day_end_ts
+            ):
                 if writer is None:
                     writer = open_order_fills_writer(temp_path)
                 write_order_fills_batch(writer, batch)
@@ -107,6 +115,7 @@ def run_for_day(
     except Exception as exc:
         log.info(f"\n  ERROR for {date_str}: {exc}")
         import traceback
+
         log.info(traceback.format_exc())
         if temp_path.exists():
             temp_path.unlink()
@@ -124,10 +133,21 @@ def main() -> None:
         default=None,
         help="Single date in YYYY-MM-DD format",
     )
-    parser.add_argument("--start", type=str, default=None, help="Start date (YYYY-MM-DD)")
-    parser.add_argument("--end", type=str, default=None, help="End date (YYYY-MM-DD, inclusive)")
-    parser.add_argument("--output", type=str, default=None, help=f"Output directory (default: {OUTPUT_DIR})")
-    parser.add_argument("--replace", action="store_true", help="Overwrite existing files")
+    parser.add_argument(
+        "--start", type=str, default=None, help="Start date (YYYY-MM-DD)"
+    )
+    parser.add_argument(
+        "--end", type=str, default=None, help="End date (YYYY-MM-DD, inclusive)"
+    )
+    parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help=f"Output directory (default: {OUTPUT_DIR})",
+    )
+    parser.add_argument(
+        "--replace", action="store_true", help="Overwrite existing files"
+    )
     args = parser.parse_args()
 
     if args.start and args.end:
