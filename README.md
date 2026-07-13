@@ -1,7 +1,7 @@
 # Poly Data Storage
 
-Polymarket data ingestion pipeline — two independent apps that fetch and store
-trade and event data as daily parquet files.
+Polymarket data ingestion pipeline — three independent apps that fetch and store
+trade, event, and resolution data as daily parquet files.
 
 ## Apps
 
@@ -24,9 +24,18 @@ structure including nested `markets` (with `conditionId`, `clobTokenIds`,
 
 **Output**: `polymarket_events_YYYY_MM_DD.parquet`
 
+### poly-events-resolve (App C) — Event Resolutions
+
+Fetches `QuestionInitialized` and `QuestionResolved` events from UMA CTF
+Adapter contracts on Polygon via SQD Portal. Joins on `questionID`, parses
+ancillary data for asset (BTC/ETH/SOL) and event type (5m/15m/1h/daily),
+and stores the binary outcome (`settled_price`: 1=Up, 0=Down).
+
+**Output**: `polymarket_events_resolve_YYYY_MM_DD.parquet`
+
 ## Usage
 
-Both apps accept `--start`, `--end`, `--output`, and `--replace` flags:
+All apps accept `--start`, `--end`, `--output`, and `--replace` flags:
 
 ```bash
 # Fetch order fills for a single day
@@ -36,12 +45,18 @@ uv run poly-fetch 2026-07-09
 uv run poly-fetch --start 2026-07-01 --end 2026-07-31
 
 # Fetch events for a date range to a custom directory
-uv run poly-events --start 2026-07-10 --end 2026-07-11 --output /mnt/volume1/vol_poly
+uv run poly-events --start 2026-05-01 --end 2026-06-01 --output /mnt/volume1/vol_poly
+uv run poly-events --start 2026-06-01 --end 2026-07-01 --output vol_poly_db
+
+
+uv run poly-fetch --start 2026-05-01 --end 2026-06-01 --output /mnt/volume1/vol_poly
+uv run poly-fetch --start 2026-06-01 --end 2026-07-01 --output vol_poly_db
+
 uv run poly-fetch --start 2026-07-11 --end 2026-07-11 --output ./test/
 
-/home/ubuntu/projects/project_poly
-
-/mnt/volume1/vol_poly
+# Fetch event resolutions
+uv run poly-events-resolve 2026-07-12
+uv run poly-events-resolve --start 2026-07-01 --end 2026-07-31 --output /mnt/volume1/vol_poly
 
 # Overwrite existing files
 uv run poly-events --start 2026-07-09 --end 2026-07-09 --replace
@@ -52,6 +67,7 @@ Can also be run as a module:
 ```bash
 uv run python -m poly_data_storage 2026-07-09
 uv run python -m poly_events_storage --start 2026-07-01 --end 2026-07-31
+uv run python -m poly_events_resolve_storage 2026-07-12
 ```
 
 ## Setup

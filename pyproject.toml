@@ -11,13 +11,14 @@ dependencies = [
 [project.scripts]
 poly-fetch = "poly_data_storage.cli:main"
 poly-events = "poly_events_storage.cli:main"
+poly-events-resolve = "poly_events_resolve_storage.cli:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/poly_data_storage", "src/poly_events_storage"]
+packages = ["src/poly_data_storage", "src/poly_events_storage", "src/poly_events_resolve_storage"]
 
 [tool.uv]
 python-preference = "only-managed"
