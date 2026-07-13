@@ -16,7 +16,6 @@ from poly_data_storage.constants import (
     RETRY_BASE_DELAY,
     SQD_DELAY,
     SQD_MAX_BLOCKS_PER_REQUEST,
-    SQD_MIN_BLOCKS_PER_REQUEST,
     SQD_URL,
     WRITE_BATCH_SIZE,
 )
@@ -98,100 +97,86 @@ def _fetch_sqd_raw(
     client: niquests.Session,
     from_block: int,
     to_block: int,
-) -> tuple[list[tuple[dict, int, int]], int]:
-    """Single HTTP request to SQD Portal. Returns (logs, parse_failures)."""
-    payload = {
-        "type": "evm",
-        "fromBlock": from_block,
-        "toBlock": to_block,
-        "fields": {
-            "block": {"number": True, "timestamp": True},
-            "log": {
-                "address": True,
-                "topics": True,
-                "data": True,
-                "transactionHash": True,
-                "logIndex": True,
-            },
-        },
-        "logs": [
-            {
-                "address": [EXCHANGE_V2],
-                "topic0": [ORDER_FILLED_TOPIC],
-            }
-        ],
-    }
+) -> Generator[tuple[dict, int, int], None, None]:
+    """Stream logs from SQD Portal, yielding (log_dict, block_num, block_ts).
 
-    block_count = to_block - from_block + 1
-    max_attempts = 3
-    for attempt in range(max_attempts):
+    Handles stream resets by continuing from the last yielded block.
+    If the HTTP connection drops mid-stream, the next request starts
+    at last_block + 1 — no data is skipped and no data is duplicated.
+    Retries up to 5 times with exponential backoff before raising.
+    """
+    current = from_block
+    retries = 0
+    max_retries = 5
+    parse_failures = 0
+
+    while current <= to_block:
+        payload = {
+            "type": "evm",
+            "fromBlock": current,
+            "toBlock": to_block,
+            "fields": {
+                "block": {"number": True, "timestamp": True},
+                "log": {
+                    "address": True,
+                    "topics": True,
+                    "data": True,
+                    "transactionHash": True,
+                    "logIndex": True,
+                },
+            },
+            "logs": [
+                {
+                    "address": [EXCHANGE_V2],
+                    "topic0": [ORDER_FILLED_TOPIC],
+                }
+            ],
+        }
+
+        block_count = to_block - current + 1
+        resp = None
         try:
             log.info(
-                f"  Requesting blocks {from_block}-{to_block} ({block_count} blocks)..."
+                f"  Requesting blocks {current}-{to_block} ({block_count} blocks)..."
             )
             resp = client.post(SQD_URL, json=payload, timeout=120.0, stream=True)
             resp.raise_for_status()
+            retries = 0
+            for line in resp.iter_lines():
+                if not line:
+                    continue
+                try:
+                    obj = orjson.loads(line)
+                except Exception:
+                    parse_failures += 1
+                    continue
+                if "header" not in obj:
+                    continue
+                block_num = obj["header"]["number"]
+                block_ts = obj["header"]["timestamp"]
+                current = block_num + 1
+                for entry in obj.get("logs", []):
+                    yield (entry, block_num, block_ts)
+            resp.close()
             break
         except Exception as exc:
-            if attempt < max_attempts - 1:
-                delay = RETRY_BASE_DELAY * (2**attempt)
-                log.info(
-                    f"      SQD retry {attempt + 1}/{max_attempts} after {delay}s: {exc}"
-                )
-                time.sleep(delay)
-            else:
+            if resp is not None:
+                try:
+                    resp.close()
+                except Exception:
+                    pass
+            retries += 1
+            if retries > max_retries:
                 raise
+            delay = RETRY_BASE_DELAY * (2 ** (retries - 1))
+            log.info(
+                f"      SQD stream reset at block {current}, "
+                f"retry {retries}/{max_retries} after {delay}s: {exc}"
+            )
+            time.sleep(delay)
 
-    results: list[tuple[dict, int, int]] = []
-    parse_failures = 0
-
-    try:
-        for line in resp.iter_lines():
-            if not line:
-                continue
-            try:
-                obj = orjson.loads(line)
-            except Exception:
-                parse_failures += 1
-                continue
-            if "header" not in obj:
-                continue
-            block_num = obj["header"]["number"]
-            block_ts = obj["header"]["timestamp"]
-            for entry in obj.get("logs", []):
-                results.append((entry, block_num, block_ts))
-    finally:
-        resp.close()
-
-    return results, parse_failures
-
-
-def fetch_sqd_page(
-    client: niquests.Session,
-    from_block: int,
-    to_block: int,
-) -> tuple[list[tuple[dict, int, int]], int]:
-    """Fetch logs from SQD Portal, splitting block range on stream resets.
-
-    If the response stream is reset (common on high-volume days where
-    10k blocks produce too much data), the range is split in half and
-    each half is fetched recursively until it succeeds or hits the
-    minimum block window.
-    """
-    try:
-        return _fetch_sqd_raw(client, from_block, to_block)
-    except Exception:
-        block_count = to_block - from_block + 1
-        if block_count <= SQD_MIN_BLOCKS_PER_REQUEST:
-            raise
-        log.info(
-            f"      SQD stream reset for {from_block}-{to_block} ({block_count} blocks), splitting..."
-        )
-        mid = from_block + block_count // 2 - 1
-        left_logs, left_fails = fetch_sqd_page(client, from_block, mid)
-        time.sleep(SQD_DELAY)
-        right_logs, right_fails = fetch_sqd_page(client, mid + 1, to_block)
-        return left_logs + right_logs, left_fails + right_fails
+    if parse_failures:
+        log.info(f"  WARNING: {parse_failures} unparseable lines in this range")
 
 
 def stream_decoded_logs(
@@ -204,9 +189,9 @@ def stream_decoded_logs(
 ) -> Generator[list[dict], None, None]:
     """Fetch and decode OrderFilled logs, yielding batches of filtered rows.
 
-    - Pages through SQD Portal block-by-block.
+    - Streams from SQD Portal with automatic continuation on stream resets.
     - Filters by timestamp [day_start_ts, day_end_ts) to enforce exact UTC day.
-    - Deduplicates by (tx_hash, log_index).
+    - Deduplicates by (tx_hash, log_index) per page (bounded memory).
     - Yields batches of up to batch_size decoded rows for incremental writing.
     """
     seen: set[tuple[str, int]] = set()
@@ -217,30 +202,19 @@ def stream_decoded_logs(
 
     while current <= end_block:
         to_block = min(current + SQD_MAX_BLOCKS_PER_REQUEST - 1, end_block)
-        raw_logs, parse_failures = fetch_sqd_page(client, current, to_block)
-
         page += 1
-        if parse_failures:
-            log.info(f"  [page {page}] WARNING: {parse_failures} unparseable lines")
-
-        if not raw_logs:
-            log.info(f"  [page {page}] blocks {current}-{to_block}: 0 logs")
-            current = to_block + 1
-            time.sleep(SQD_DELAY)
-            continue
-
-        # Get exact time range from actual block timestamps in the data
-        actual_min_ts = min(ts for _, _, ts in raw_logs)
-        actual_max_ts = max(ts for _, _, ts in raw_logs)
-        from_str = datetime.fromtimestamp(actual_min_ts, tz=UTC).strftime(
-            "%Y-%m-%d %H:%M:%S"
-        )
-        to_str = datetime.fromtimestamp(actual_max_ts, tz=UTC).strftime(
-            "%Y-%m-%d %H:%M:%S"
-        )
-
         page_decoded = 0
-        for raw_log, block_num, block_ts in raw_logs:
+        page_min_ts: int | None = None
+        page_max_ts: int | None = None
+        last_block = current - 1
+
+        for raw_log, block_num, block_ts in _fetch_sqd_raw(client, current, to_block):
+            last_block = block_num
+            if page_min_ts is None or block_ts < page_min_ts:
+                page_min_ts = block_ts
+            if page_max_ts is None or block_ts > page_max_ts:
+                page_max_ts = block_ts
+
             if block_ts < day_start_ts or block_ts >= day_end_ts:
                 continue
 
@@ -261,12 +235,22 @@ def stream_decoded_logs(
                 yield batch
                 batch = []
 
-        log.info(
-            f"  [page {page}] blocks {current}-{to_block}: {page_decoded} fills "
-            f"({from_str} to {to_str}, total: {total_decoded:,})"
-        )
-        del raw_logs
-        current = to_block + 1
+        if page_min_ts is not None:
+            from_str = datetime.fromtimestamp(page_min_ts, tz=UTC).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+            to_str = datetime.fromtimestamp(page_max_ts, tz=UTC).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+            log.info(
+                f"  [page {page}] blocks {current}-{to_block}: {page_decoded} fills "
+                f"({from_str} to {to_str}, total: {total_decoded:,})"
+            )
+        else:
+            log.info(f"  [page {page}] blocks {current}-{to_block}: 0 logs")
+
+        seen.clear()
+        current = last_block + 1 if last_block >= current else to_block + 1
         time.sleep(SQD_DELAY)
 
     if batch:
