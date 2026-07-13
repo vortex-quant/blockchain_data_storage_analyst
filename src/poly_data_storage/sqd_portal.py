@@ -12,7 +12,6 @@ import orjson
 from poly_data_storage.constants import (
     EXCHANGE_V2,
     EXCHANGE_V2_LOWER,
-    MAX_RETRIES,
     ORDER_FILLED_TOPIC,
     RETRY_BASE_DELAY,
     SQD_DELAY,
@@ -127,14 +126,18 @@ def _fetch_sqd_raw(
     max_attempts = 3
     for attempt in range(max_attempts):
         try:
-            log.info(f"  Requesting blocks {from_block}-{to_block} ({block_count} blocks)...")
+            log.info(
+                f"  Requesting blocks {from_block}-{to_block} ({block_count} blocks)..."
+            )
             resp = client.post(SQD_URL, json=payload, timeout=120.0, stream=True)
             resp.raise_for_status()
             break
         except Exception as exc:
             if attempt < max_attempts - 1:
                 delay = RETRY_BASE_DELAY * (2**attempt)
-                log.info(f"      SQD retry {attempt + 1}/{max_attempts} after {delay}s: {exc}")
+                log.info(
+                    f"      SQD retry {attempt + 1}/{max_attempts} after {delay}s: {exc}"
+                )
                 time.sleep(delay)
             else:
                 raise
@@ -177,11 +180,13 @@ def fetch_sqd_page(
     """
     try:
         return _fetch_sqd_raw(client, from_block, to_block)
-    except Exception as exc:
+    except Exception:
         block_count = to_block - from_block + 1
         if block_count <= SQD_MIN_BLOCKS_PER_REQUEST:
             raise
-        log.info(f"      SQD stream reset for {from_block}-{to_block} ({block_count} blocks), splitting...")
+        log.info(
+            f"      SQD stream reset for {from_block}-{to_block} ({block_count} blocks), splitting..."
+        )
         mid = from_block + block_count // 2 - 1
         left_logs, left_fails = fetch_sqd_page(client, from_block, mid)
         time.sleep(SQD_DELAY)
@@ -227,8 +232,12 @@ def stream_decoded_logs(
         # Get exact time range from actual block timestamps in the data
         actual_min_ts = min(ts for _, _, ts in raw_logs)
         actual_max_ts = max(ts for _, _, ts in raw_logs)
-        from_str = datetime.fromtimestamp(actual_min_ts, tz=UTC).strftime("%Y-%m-%d %H:%M:%S")
-        to_str = datetime.fromtimestamp(actual_max_ts, tz=UTC).strftime("%Y-%m-%d %H:%M:%S")
+        from_str = datetime.fromtimestamp(actual_min_ts, tz=UTC).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        to_str = datetime.fromtimestamp(actual_max_ts, tz=UTC).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
 
         page_decoded = 0
         for raw_log, block_num, block_ts in raw_logs:

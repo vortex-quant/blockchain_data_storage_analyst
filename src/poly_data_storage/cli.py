@@ -20,7 +20,7 @@ from pathlib import Path
 
 import niquests
 
-from poly_data_storage.block_utils import estimate_block_range
+from poly_data_storage.block_timestamp_resolve import resolve_block_range
 from poly_data_storage.constants import OUTPUT_DIR
 from poly_data_storage.logger import get_logger
 from poly_data_storage.sqd_portal import stream_decoded_logs
@@ -73,10 +73,10 @@ def run_for_day(
         temp_path.unlink()
 
     try:
-        # Step 1: Estimate block range from UTC midnight boundaries
+        # Step 1: Resolve block range from UTC midnight boundaries
         log.info("\n--- Step 1: Resolving block range ---")
         t0 = time.time()
-        scan_start, scan_end, day_start_ts, day_end_ts = estimate_block_range(
+        scan_start, scan_end, day_start_ts, day_end_ts = resolve_block_range(
             client, date_str
         )
         log.info(f"  Resolved in {time.time() - t0:.1f}s")

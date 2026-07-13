@@ -42,7 +42,7 @@ def _sqd_timestamp_to_block(client: niquests.Session, target_ts: int) -> int:
                 raise
 
 
-def estimate_block_range(
+def resolve_block_range(
     client: niquests.Session,
     date_str: str,
 ) -> tuple[int, int, int, int]:
