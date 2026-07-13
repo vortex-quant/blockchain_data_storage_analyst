@@ -26,14 +26,6 @@ from poly_data_storage.logger import get_logger
 log = get_logger()
 
 
-def _ts_str(ref_ts: int, ref_block: int, block_num: int, block_time: float) -> str:
-    """Estimate UTC time string for a block number using a reference point."""
-    if ref_ts == 0 or ref_block == 0 or block_time <= 0:
-        return "?"
-    est_ts = ref_ts + (block_num - ref_block) * block_time
-    return datetime.fromtimestamp(int(est_ts), tz=UTC).strftime("%Y-%m-%d %H:%M:%S")
-
-
 def decode_v2_order_filled(log: dict, block_num: int, block_ts: int) -> dict | None:
     """Decode a V2 OrderFilled event from SQD Portal log format.
 
@@ -107,9 +99,6 @@ def _fetch_sqd_raw(
     client: niquests.Session,
     from_block: int,
     to_block: int,
-    ref_block: int = 0,
-    ref_ts: int = 0,
-    block_time: float = 2.0,
 ) -> tuple[list[tuple[dict, int, int]], int]:
     """Single HTTP request to SQD Portal. Returns (logs, parse_failures)."""
     payload = {
@@ -135,13 +124,11 @@ def _fetch_sqd_raw(
     }
 
     block_count = to_block - from_block + 1
-    max_attempts = 10
+    max_attempts = 3
     for attempt in range(max_attempts):
         try:
-            from_str = _ts_str(ref_ts, ref_block, from_block, block_time)
-            to_str = _ts_str(ref_ts, ref_block, to_block, block_time)
-            log.info(f"  Requesting blocks {from_block}-{to_block} ({block_count} blocks, ~{from_str} to ~{to_str})...")
-            resp = client.post(SQD_URL, json=payload, timeout=10.0, stream=True)
+            log.info(f"  Requesting blocks {from_block}-{to_block} ({block_count} blocks)...")
+            resp = client.post(SQD_URL, json=payload, timeout=120.0, stream=True)
             resp.raise_for_status()
             break
         except Exception as exc:
@@ -180,9 +167,6 @@ def fetch_sqd_page(
     client: niquests.Session,
     from_block: int,
     to_block: int,
-    ref_block: int = 0,
-    ref_ts: int = 0,
-    block_time: float = 2.0,
 ) -> tuple[list[tuple[dict, int, int]], int]:
     """Fetch logs from SQD Portal, splitting block range on stream resets.
 
@@ -192,16 +176,16 @@ def fetch_sqd_page(
     minimum block window.
     """
     try:
-        return _fetch_sqd_raw(client, from_block, to_block, ref_block, ref_ts, block_time)
+        return _fetch_sqd_raw(client, from_block, to_block)
     except Exception as exc:
         block_count = to_block - from_block + 1
         if block_count <= SQD_MIN_BLOCKS_PER_REQUEST:
             raise
         log.info(f"      SQD stream reset for {from_block}-{to_block} ({block_count} blocks), splitting...")
         mid = from_block + block_count // 2 - 1
-        left_logs, left_fails = fetch_sqd_page(client, from_block, mid, ref_block, ref_ts, block_time)
+        left_logs, left_fails = fetch_sqd_page(client, from_block, mid)
         time.sleep(SQD_DELAY)
-        right_logs, right_fails = fetch_sqd_page(client, mid + 1, to_block, ref_block, ref_ts, block_time)
+        right_logs, right_fails = fetch_sqd_page(client, mid + 1, to_block)
         return left_logs + right_logs, left_fails + right_fails
 
 
@@ -226,24 +210,16 @@ def stream_decoded_logs(
     page = 0
     total_decoded = 0
 
-    # Compute actual block time from the estimated range for time display
-    block_range = end_block - start_block
-    block_time = (day_end_ts - day_start_ts) / block_range if block_range > 0 else 2.0
-
     while current <= end_block:
         to_block = min(current + SQD_MAX_BLOCKS_PER_REQUEST - 1, end_block)
-        raw_logs, parse_failures = fetch_sqd_page(
-            client, current, to_block, start_block, day_start_ts, block_time
-        )
+        raw_logs, parse_failures = fetch_sqd_page(client, current, to_block)
 
         page += 1
         if parse_failures:
             log.info(f"  [page {page}] WARNING: {parse_failures} unparseable lines")
 
         if not raw_logs:
-            from_str = _ts_str(day_start_ts, start_block, current, block_time)
-            to_str = _ts_str(day_start_ts, start_block, to_block, block_time)
-            log.info(f"  [page {page}] blocks {current}-{to_block} (~{from_str} to ~{to_str}): 0 logs")
+            log.info(f"  [page {page}] blocks {current}-{to_block}: 0 logs")
             current = to_block + 1
             time.sleep(SQD_DELAY)
             continue
@@ -277,8 +253,8 @@ def stream_decoded_logs(
                 batch = []
 
         log.info(
-            f"  [page {page}] blocks {current}-{to_block} ({from_str} to {to_str}): "
-            f"{page_decoded} fills (total: {total_decoded:,})"
+            f"  [page {page}] blocks {current}-{to_block}: {page_decoded} fills "
+            f"({from_str} to {to_str}, total: {total_decoded:,})"
         )
         del raw_logs
         current = to_block + 1
