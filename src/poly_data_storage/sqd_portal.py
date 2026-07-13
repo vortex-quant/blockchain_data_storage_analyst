@@ -35,7 +35,7 @@ def decode_v2_order_filled(log: dict, block_num: int, block_ts: int) -> dict | N
     For BUY (side=0): makerAmount=USDC(6dec), takerAmount=shares(6dec)
     For SELL (side=1): makerAmount=shares(6dec), takerAmount=USDC(6dec)
 
-    fill_role is "taker_aggregate" when taker == EXCHANGE_V2, else "maker".
+    is_taker_aggregate is True when taker == EXCHANGE_V2, else False (maker).
     """
     topics = log.get("topics", [])
     if len(topics) < 4:
@@ -53,8 +53,6 @@ def decode_v2_order_filled(log: dict, block_num: int, block_ts: int) -> dict | N
     maker_amount = fields[2]
     taker_amount = fields[3]
     fee = fields[4]
-    builder = "0x" + format(fields[5], "040x")[-40:]
-    metadata = "0x" + format(fields[6], "064x")
 
     if side_val == 0:
         amount_usd = maker_amount / 1e6
@@ -68,7 +66,7 @@ def decode_v2_order_filled(log: dict, block_num: int, block_ts: int) -> dict | N
         return None
 
     taker_addr = "0x" + topics[3][26:].lower()
-    fill_role = "taker_aggregate" if taker_addr == EXCHANGE_V2_LOWER else "maker"
+    is_taker_aggregate = taker_addr == EXCHANGE_V2_LOWER
 
     return {
         "block_number": block_num,
@@ -79,14 +77,10 @@ def decode_v2_order_filled(log: dict, block_num: int, block_ts: int) -> dict | N
         "order_hash": topics[1],
         "maker": "0x" + topics[2][26:],
         "taker": "0x" + topics[3][26:],
-        "fill_role": fill_role,
-        "side": "BUY" if side_val == 0 else "SELL",
+        "is_taker": is_taker_aggregate,
+        "is_sell": side_val == 1,
         "token_id": str(token_id),
-        "maker_amount_raw": str(maker_amount),
-        "taker_amount_raw": str(taker_amount),
-        "fee": str(fee),
-        "builder": builder,
-        "metadata": metadata,
+        "fee": fee / 1e6,
         "amount_usd": amount_usd,
         "shares": shares,
         "price": price,
