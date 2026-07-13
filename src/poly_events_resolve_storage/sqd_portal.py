@@ -1,7 +1,8 @@
-"""SQD Portal — block resolution, log fetching, and UMA event decoding.
+"""SQD Portal — block resolution, log fetching, and ConditionResolution decoding.
 
-Fetches QuestionInitialized and QuestionResolved events from UMA CTF Adapter
-contracts on Polygon, joins them on questionID, and parses ancillary data.
+Fetches ConditionResolution events from the Gnosis ConditionalTokens contract
+on Polygon. This single contract emits resolution events for ALL Polymarket
+markets — both standard (UmaCtfAdapter) and NegRisk.
 """
 
 from __future__ import annotations
@@ -13,17 +14,14 @@ import niquests
 import orjson
 
 from poly_events_resolve_storage.constants import (
-    ASSET_KEYWORDS,
-    EVENT_TYPE_KEYWORDS,
+    CONDITION_RESOLUTION_TOPIC,
+    CTF_ADDRESS,
     MAX_RETRIES,
-    QUESTION_INITIALIZED_TOPIC,
-    QUESTION_RESOLVED_TOPIC,
     RETRY_BASE_DELAY,
     SQD_DELAY,
     SQD_MAX_BLOCKS_PER_REQUEST,
     SQD_TIMESTAMP_URL,
     SQD_URL,
-    UMA_CTF_ADAPTERS,
 )
 
 # ── Block resolution ──────────────────────────────────────────────────────────
@@ -68,54 +66,53 @@ def resolve_block_range(
 # ── Event decoding ────────────────────────────────────────────────────────────
 
 
-def _decode_initialized(log: dict) -> dict | None:
-    """Decode QuestionInitialized(bytes ancillaryData, bytes32 indexed questionID)."""
+def _decode_resolution(log: dict, block_num: int, block_ts: int) -> dict | None:
+    """Decode ConditionResolution event.
+
+    ConditionResolution(bytes32 indexed conditionId, address indexed oracle,
+        bytes32 indexed questionId, uint256 outcomeSlotCount, uint256[] payoutNumerators)
+
+    For binary markets: payouts [1,0] = Up/Yes, [0,1] = Down/No.
+    settled_price: 1 = Up, 0 = Down.
+    """
     topics = log.get("topics", [])
-    if len(topics) < 2:
+    if len(topics) < 4:
         return None
-    data = log["data"]
+    data = log.get("data", "")
     if data.startswith("0x"):
         data = data[2:]
     if len(data) < 128:
         return None
-    length = int(data[64:128], 16)
-    content_hex = data[128 : 128 + length * 2]
-    ancillary = bytes.fromhex(content_hex).decode("utf-8", errors="replace")
-    return {"question_id": topics[1], "ancillary_data": ancillary}
-
-
-def _decode_resolved(log: dict, block_num: int, block_ts: int) -> dict | None:
-    """Decode QuestionResolved(bytes32 indexed questionID, int256 indexed settledPrice, uint256[] payouts)."""
-    topics = log.get("topics", [])
-    if len(topics) < 3:
+    # data: outcomeSlotCount (uint256), payoutNumerators (dynamic array)
+    # Dynamic array offset (in bytes)
+    offset = int(data[64:128], 16) * 2
+    if offset + 64 > len(data):
         return None
-    settled = int(topics[2], 16)
-    if settled >= 2**255:
-        settled -= 2**256
+    arr_length = int(data[offset : offset + 64], 16)
+    payouts: list[int] = []
+    for i in range(arr_length):
+        start = offset + 64 + i * 64
+        if start + 64 > len(data):
+            break
+        payouts.append(int(data[start : start + 64], 16))
+    # Normalize to 1 (Up) or 0 (Down) for binary markets
+    if len(payouts) == 2:
+        if payouts[0] == 1 and payouts[1] == 0:
+            settled = 1
+        elif payouts[0] == 0 and payouts[1] == 1:
+            settled = 0
+        else:
+            settled = -1  # tie or invalid
+    else:
+        settled = -1
     return {
         "block_number": block_num,
         "timestamp": block_ts,
         "tx_hash": log.get("transactionHash"),
         "log_index": log.get("logIndex"),
-        "question_id": topics[1],
+        "question_id": topics[3],
         "settled_price": settled,
     }
-
-
-def _parse_ancillary(text: str) -> tuple[str, str]:
-    """Extract asset and event_type from ancillary data text."""
-    lower = text.lower()
-    asset = ""
-    for keyword, symbol in ASSET_KEYWORDS:
-        if keyword in lower:
-            asset = symbol
-            break
-    event_type = ""
-    for keyword, etype in EVENT_TYPE_KEYWORDS:
-        if keyword in lower:
-            event_type = etype
-            break
-    return asset, event_type
 
 
 # ── Log fetching ──────────────────────────────────────────────────────────────
@@ -126,39 +123,47 @@ def _fetch_sqd_raw(
     from_block: int,
     to_block: int,
 ) -> list[tuple[dict, int, int]]:
-    """Fetch logs from SQD Portal. Returns list of (log, block_num, block_ts)."""
-    payload = {
-        "type": "evm",
-        "fromBlock": from_block,
-        "toBlock": to_block,
-        "fields": {
-            "block": {"number": True, "timestamp": True},
-            "log": {
-                "address": True,
-                "topics": True,
-                "data": True,
-                "transactionHash": True,
-                "logIndex": True,
-            },
-        },
-        "logs": [
-            {
-                "address": UMA_CTF_ADAPTERS,
-                "topic0": [QUESTION_INITIALIZED_TOPIC, QUESTION_RESOLVED_TOPIC],
-            }
-        ],
-    }
+    """Fetch QuestionResolved logs from SQD Portal with stream continuation.
 
+    SQD Portal may end the stream before reaching toBlock — the client must
+    re-request from last_received_block + 1 until the full range is covered.
+    Returns list of (log, block_num, block_ts).
+    """
     results: list[tuple[dict, int, int]] = []
+    current = from_block
     retries = 0
 
-    while True:
+    while current <= to_block:
+        payload = {
+            "type": "evm",
+            "fromBlock": current,
+            "toBlock": to_block,
+            "fields": {
+                "block": {"number": True, "timestamp": True},
+                "log": {
+                    "address": True,
+                    "topics": True,
+                    "data": True,
+                    "transactionHash": True,
+                    "logIndex": True,
+                },
+            },
+            "logs": [
+                {
+                    "address": [CTF_ADDRESS],
+                    "topic0": [CONDITION_RESOLUTION_TOPIC],
+                }
+            ],
+        }
+
+        resp = None
         try:
             print(
-                f"  Requesting blocks {from_block}-{to_block} ({to_block - from_block + 1} blocks)..."
+                f"  Requesting blocks {current}-{to_block} ({to_block - current + 1} blocks)..."
             )
             resp = client.post(SQD_URL, json=payload, timeout=120.0, stream=True)
             resp.raise_for_status()
+            retries = 0
             for line in resp.iter_lines():
                 if not line:
                     continue
@@ -170,11 +175,20 @@ def _fetch_sqd_raw(
                     continue
                 block_num = obj["header"]["number"]
                 block_ts = obj["header"]["timestamp"]
+                current = block_num + 1
                 for entry in obj.get("logs", []):
                     results.append((entry, block_num, block_ts))
             resp.close()
-            break
+            if current > to_block:
+                break
+            # Stream ended early — SQD pagination, continue from current
+            time.sleep(SQD_DELAY)
         except Exception as exc:
+            if resp is not None:
+                try:
+                    resp.close()
+                except Exception:
+                    pass
             retries += 1
             if retries > MAX_RETRIES:
                 raise
@@ -185,7 +199,7 @@ def _fetch_sqd_raw(
     return results
 
 
-# ── Main fetch + join ─────────────────────────────────────────────────────────
+# ── Main fetch ────────────────────────────────────────────────────────────────
 
 
 def fetch_events(
@@ -195,11 +209,10 @@ def fetch_events(
     day_start_ts: int,
     day_end_ts: int,
 ) -> list[dict]:
-    """Fetch UMA events, join Initialized+Resolved, parse ancillary data.
+    """Fetch QuestionResolved events within [day_start_ts, day_end_ts).
 
-    Returns one row per resolved market within [day_start_ts, day_end_ts).
+    Returns one row per resolved market.
     """
-    initialized: dict[str, dict] = {}
     resolved: list[dict] = []
 
     current = start_block
@@ -207,44 +220,18 @@ def fetch_events(
         to_block = min(current + SQD_MAX_BLOCKS_PER_REQUEST - 1, end_block)
         logs = _fetch_sqd_raw(client, current, to_block)
 
-        page_init = page_resolved = 0
+        page_count = 0
         for log, block_num, block_ts in logs:
-            topic0 = log.get("topics", [""])[0]
+            if block_ts < day_start_ts or block_ts >= day_end_ts:
+                continue
+            res = _decode_resolution(log, block_num, block_ts)
+            if res:
+                resolved.append(res)
+                page_count += 1
 
-            if topic0 == QUESTION_INITIALIZED_TOPIC:
-                init = _decode_initialized(log)
-                if init and init["question_id"] not in initialized:
-                    initialized[init["question_id"]] = init
-                    page_init += 1
-
-            elif topic0 == QUESTION_RESOLVED_TOPIC:
-                if block_ts < day_start_ts or block_ts >= day_end_ts:
-                    continue
-                res = _decode_resolved(log, block_num, block_ts)
-                if res:
-                    resolved.append(res)
-                    page_resolved += 1
-
-        print(f"  [{current}-{to_block}] init: {page_init}, resolved: {page_resolved}")
+        print(f"  [{current}-{to_block}] resolved: {page_count}")
         current = to_block + 1
         time.sleep(SQD_DELAY)
 
-    # Join resolved with initialized on question_id
-    rows: list[dict] = []
-    for res in resolved:
-        init = initialized.get(res["question_id"])
-        ancillary = init["ancillary_data"] if init else ""
-        asset, event_type = _parse_ancillary(ancillary) if ancillary else ("", "")
-        rows.append(
-            {
-                **res,
-                "ancillary_data": ancillary,
-                "asset": asset,
-                "event_type": event_type,
-            }
-        )
-
-    print(
-        f"  Total: {len(initialized)} initialized, {len(resolved)} resolved, {len(rows)} joined rows"
-    )
-    return rows
+    print(f"  Total: {len(resolved)} resolved")
+    return resolved

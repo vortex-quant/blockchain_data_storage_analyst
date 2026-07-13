@@ -12,27 +12,23 @@ from poly_events_resolve_storage.constants import (
     PARQUET_COMPRESSION_LEVEL,
 )
 
-# Non-redundant schema:
-# - block_number, timestamp, tx_hash, log_index: blockchain context
-# - question_id: unique market identifier
-# - settled_price: 1=Up, 0=Down (the outcome)
-# - ancillary_data: raw question text (for verification + parsing)
-# - asset, event_type: parsed from ancillary_data (pre-computed for filtering)
+# Minimal schema — join with poly_events_storage (App B) on question_id
+# for ancillary_data, asset, event_type.
 #
 # Dropped as redundant: block_time (from timestamp), is_up (from settled_price),
-# payouts (from settled_price for binary), adapter_address (not analytical).
+# payouts (from settled_price for binary), adapter_address (not analytical),
+# ancillary_data/asset/event_type (available in App B).
 
-RESOLVE_SCHEMA = pa.schema([
-    pa.field("block_number", pa.int64()),
-    pa.field("timestamp", pa.int64()),
-    pa.field("tx_hash", pa.string()),
-    pa.field("log_index", pa.int32()),
-    pa.field("question_id", pa.string()),
-    pa.field("settled_price", pa.int64()),
-    pa.field("ancillary_data", pa.string()),
-    pa.field("asset", pa.string()),
-    pa.field("event_type", pa.string()),
-])
+RESOLVE_SCHEMA = pa.schema(
+    [
+        pa.field("block_number", pa.int64()),
+        pa.field("timestamp", pa.int64()),
+        pa.field("tx_hash", pa.string()),
+        pa.field("log_index", pa.int32()),
+        pa.field("question_id", pa.string()),
+        pa.field("settled_price", pa.int64()),
+    ]
+)
 
 
 def write_parquet(rows: list[dict], path: Path) -> int:

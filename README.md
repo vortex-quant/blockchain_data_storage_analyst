@@ -55,7 +55,7 @@ uv run poly-fetch --start 2026-06-01 --end 2026-07-01 --output vol_poly_db
 uv run poly-fetch --start 2026-07-11 --end 2026-07-11 --output ./test/
 
 # Fetch event resolutions
-uv run poly-events-resolve 2026-07-12
+uv run poly-events-resolve 2026-07-12 --output /mnt/volume1/vol_poly
 uv run poly-events-resolve --start 2026-07-01 --end 2026-07-31 --output /mnt/volume1/vol_poly
 
 # Overwrite existing files
