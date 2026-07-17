@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import polars as pl
 
+from poly_trades_normalize import config
 from poly_trades_normalize.storage import (
     EVENTS_CATEGORICAL_COLS,
     TRADES_CATEGORICAL_COLS,
