@@ -21,27 +21,29 @@ from poly_events_storage.constants import (
 # Core columns match the target format in /Volumes/T9/project_polymarket_database/events.
 # Additional columns retain useful event/market metadata without nesting.
 
-EVENTS_SCHEMA = pa.schema([
-    # Core normalized columns (target schema)
-    pa.field("ts", pa.timestamp("us", tz="UTC")),
-    pa.field("asset", pa.string()),
-    pa.field("event_slug", pa.string()),
-    pa.field("event_type", pa.string()),
-    pa.field("start_epoch", pa.int64()),
-    pa.field("end_epoch", pa.int64()),
-    pa.field("condition_id", pa.string()),
-    pa.field("token_id_up", pa.string()),
-    pa.field("token_id_down", pa.string()),
-    pa.field("question", pa.string()),
-    # Additional useful columns
-    pa.field("event_id", pa.int64()),
-    pa.field("market_id", pa.int64()),
-    pa.field("outcomes", pa.string()),
-    pa.field("outcome_prices", pa.string()),
-    pa.field("question_id", pa.string()),
-    pa.field("neg_risk", pa.bool_()),
-    pa.field("volume", pa.float64()),
-])
+EVENTS_SCHEMA = pa.schema(
+    [
+        # Core normalized columns (target schema)
+        pa.field("ts", pa.timestamp("us", tz="UTC")),
+        pa.field("asset", pa.string()),
+        pa.field("event_slug", pa.string()),
+        pa.field("event_type", pa.string()),
+        pa.field("start_epoch", pa.int64()),
+        pa.field("end_epoch", pa.int64()),
+        pa.field("condition_id", pa.string()),
+        pa.field("token_id_up", pa.string()),
+        pa.field("token_id_down", pa.string()),
+        pa.field("question", pa.string()),
+        # Additional useful columns
+        pa.field("event_id", pa.int64()),
+        pa.field("market_id", pa.int64()),
+        pa.field("outcomes", pa.string()),
+        pa.field("outcome_prices", pa.string()),
+        pa.field("question_id", pa.string()),
+        pa.field("neg_risk", pa.bool_()),
+        pa.field("volume", pa.float64()),
+    ]
+)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -52,7 +54,7 @@ def _to_int(value, default=0):
         return default
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return default
 
 
@@ -61,7 +63,7 @@ def _to_float(value, default=0.0):
         return default
     try:
         return float(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return default
 
 
@@ -150,38 +152,40 @@ def normalize_event(event: dict) -> list[dict]:
 
         # Calculate start_epoch
         start_epoch = None
-        if end_epoch is not None and event_type and event_type in EVENT_TYPE_DURATION_SEC:
+        if (
+            end_epoch is not None
+            and event_type
+            and event_type in EVENT_TYPE_DURATION_SEC
+        ):
             start_epoch = end_epoch - EVENT_TYPE_DURATION_SEC[event_type]
         else:
             start_dt = _parse_iso(market.get("startDate"))
             if start_dt:
                 start_epoch = int(start_dt.timestamp())
 
-        # Build normalized event_slug for updown events
-        if asset and event_type and start_epoch is not None:
-            norm_slug = f"{asset.lower()}-updown-{event_type}-{start_epoch}"
-        else:
-            norm_slug = event_slug
-
-        rows.append({
-            "ts": ts,
-            "asset": asset,
-            "event_slug": norm_slug,
-            "event_type": event_type,
-            "start_epoch": start_epoch if start_epoch is not None else 0,
-            "end_epoch": end_epoch if end_epoch is not None else 0,
-            "condition_id": condition_id if condition_id else "",
-            "token_id_up": token_id_up if token_id_up else "",
-            "token_id_down": token_id_down if token_id_down else "",
-            "question": question if question else "",
-            "event_id": event_id,
-            "market_id": market_id,
-            "outcomes": orjson.dumps(outcomes).decode() if outcomes else "[]",
-            "outcome_prices": orjson.dumps(outcome_prices).decode() if outcome_prices else "[]",
-            "question_id": market.get("questionID") or "",
-            "neg_risk": neg_risk,
-            "volume": volume,
-        })
+        rows.append(
+            {
+                "ts": ts,
+                "asset": asset,
+                "event_slug": event_slug,
+                "event_type": event_type,
+                "start_epoch": start_epoch if start_epoch is not None else 0,
+                "end_epoch": end_epoch if end_epoch is not None else 0,
+                "condition_id": condition_id if condition_id else "",
+                "token_id_up": token_id_up if token_id_up else "",
+                "token_id_down": token_id_down if token_id_down else "",
+                "question": question if question else "",
+                "event_id": event_id,
+                "market_id": market_id,
+                "outcomes": orjson.dumps(outcomes).decode() if outcomes else "[]",
+                "outcome_prices": orjson.dumps(outcome_prices).decode()
+                if outcome_prices
+                else "[]",
+                "question_id": market.get("questionID") or "",
+                "neg_risk": neg_risk,
+                "volume": volume,
+            }
+        )
 
     return rows
 
