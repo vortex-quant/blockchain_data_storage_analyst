@@ -1,4 +1,3 @@
-
 *.env
 venv
 __pycache__
@@ -6,9 +5,7 @@ __pycache__
 .DS_Store
 .AppleDouble
 
-docs
 *.egg-info
-.ruff_cache
 .ruff_cache
 .pytest_cache
 

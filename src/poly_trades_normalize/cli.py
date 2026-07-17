@@ -10,12 +10,11 @@ Only --start and --end are set via CLI.
 
 from __future__ import annotations
 
-import argparse
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import UTC, datetime, timedelta
 
-from poly_trades_normalize.config import get_config
+from poly_trades_normalize import config
 from poly_trades_normalize.normalizer import process_day
 
 
@@ -32,12 +31,13 @@ def daterange(start: str, end: str) -> list[str]:
 
 
 def _process_day_wrapper(date_str: str) -> tuple[bool, str]:
-    """Wrapper for ProcessPoolExecutor — imports config in child process."""
-    config = get_config()
-    return process_day(date_str, config)
+    """Wrapper for ProcessPoolExecutor."""
+    return process_day(date_str)
 
 
 def main() -> None:
+    import argparse
+
     parser = argparse.ArgumentParser(
         prog="poly-trades-normalize",
         description=(
@@ -46,37 +46,27 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--start",
-        type=str,
-        required=True,
-        help="Start date (YYYY-MM-DD, inclusive)",
+        "--start", type=str, required=True, help="Start date (YYYY-MM-DD, inclusive)"
     )
     parser.add_argument(
-        "--end",
-        type=str,
-        required=True,
-        help="End date (YYYY-MM-DD, inclusive)",
+        "--end", type=str, required=True, help="End date (YYYY-MM-DD, inclusive)"
     )
     args = parser.parse_args()
 
-    config = get_config()
-
-    # Build date list
     dates = daterange(args.start, args.end)
     print(f"\n  Dates to process: {len(dates)}")
     print(f"  Range: {dates[0]} to {dates[-1]}")
-    print(f"  Orders input:  {config.orders_dir}")
-    print(f"  Events input:  {config.events_dir}")
-    print(f"  Trades output: {config.trades_output_dir}")
-    print(f"  Events output: {config.events_output_dir}")
-    print(f"  Max workers:   {config.max_workers}")
-    print(f"  Replace:       {config.replace}")
+    print(f"  Orders input:  {config.ORDERS_DIR}")
+    print(f"  Events input:  {config.EVENTS_DIR}")
+    print(f"  Trades output: {config.TRADES_OUTPUT_DIR}")
+    print(f"  Events output: {config.EVENTS_OUTPUT_DIR}")
+    print(f"  Max workers:   {config.MAX_WORKERS}")
+    print(f"  Replace:       {config.REPLACE}")
 
-    # Process days in parallel
     success_count = 0
     fail_count = 0
 
-    with ProcessPoolExecutor(max_workers=config.max_workers) as executor:
+    with ProcessPoolExecutor(max_workers=config.MAX_WORKERS) as executor:
         futures = {
             executor.submit(_process_day_wrapper, date_str): date_str
             for date_str in dates

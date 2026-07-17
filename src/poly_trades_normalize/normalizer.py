@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import polars as pl
 
-from poly_trades_normalize.config import Config
 from poly_trades_normalize.storage import (
     EVENTS_CATEGORICAL_COLS,
     TRADES_CATEGORICAL_COLS,
@@ -29,8 +28,8 @@ from poly_trades_normalize.storage import (
     write_parquet,
 )
 
-
 # ── Resolution parsing ────────────────────────────────────────────────────────
+
 
 def _parse_resolution(outcome_prices: str) -> str | None:
     """Parse outcome_prices JSON string into resolution label.
@@ -47,6 +46,7 @@ def _parse_resolution(outcome_prices: str) -> str | None:
 
 # ── Events normalization ──────────────────────────────────────────────────────
 
+
 def normalize_events(events_raw: pl.DataFrame) -> pl.DataFrame:
     """Normalize raw blockchain events into the target events schema.
 
@@ -62,8 +62,7 @@ def normalize_events(events_raw: pl.DataFrame) -> pl.DataFrame:
         question, resolution
     """
     return (
-        events_raw
-        .with_columns(
+        events_raw.with_columns(
             pl.col("outcome_prices")
             .map_elements(_parse_resolution, return_dtype=pl.String)
             .alias("resolution")
@@ -81,13 +80,12 @@ def normalize_events(events_raw: pl.DataFrame) -> pl.DataFrame:
             pl.col("question"),
             pl.col("resolution"),
         )
-        .with_columns(
-            [pl.col(c).cast(pl.Categorical) for c in EVENTS_CATEGORICAL_COLS]
-        )
+        .with_columns([pl.col(c).cast(pl.Categorical) for c in EVENTS_CATEGORICAL_COLS])
     )
 
 
 # ── Token lookup ──────────────────────────────────────────────────────────────
+
 
 def build_token_lookup(events_raw: pl.DataFrame) -> pl.DataFrame:
     """Build a token_id → event metadata lookup by unpivoting token_id_up/down.
@@ -137,6 +135,7 @@ def build_token_lookup(events_raw: pl.DataFrame) -> pl.DataFrame:
 
 
 # ── Trades normalization ──────────────────────────────────────────────────────
+
 
 def normalize_trades(
     orders: pl.DataFrame,
@@ -198,58 +197,52 @@ def normalize_trades(
             pl.col("maker"),
         )
         # Step 4: Cast low-cardinality columns to Categorical
-        .with_columns(
-            [pl.col(c).cast(pl.Categorical) for c in TRADES_CATEGORICAL_COLS]
-        )
+        .with_columns([pl.col(c).cast(pl.Categorical) for c in TRADES_CATEGORICAL_COLS])
         .sort("time")
     )
 
 
 # ── Day processing ────────────────────────────────────────────────────────────
 
-def process_day(date_str: str, config: Config) -> tuple[bool, str]:
+
+def process_day(date_str: str) -> tuple[bool, str]:
     """Process a single day: produce both normalized trades and events parquet.
 
-    Returns (success, message). Reads from config for all paths and settings.
+    Returns (success, message). Reads from config constants for all paths and settings.
     Skips if both output files already exist and replace=False.
     """
-    trades_out = output_trades_path(config.trades_output_dir, date_str)
-    events_out = output_events_path(config.events_output_dir, date_str)
+    trades_out = output_trades_path(config.TRADES_OUTPUT_DIR, date_str)
+    events_out = output_events_path(config.EVENTS_OUTPUT_DIR, date_str)
 
-    # Skip if both outputs exist and replace is False
-    if not config.replace and trades_out.exists() and events_out.exists():
+    if not config.REPLACE and trades_out.exists() and events_out.exists():
         return True, f"{date_str}: skipped (already exists)"
 
-    # Resolve input file paths
-    orders_path = input_orders_path(config.orders_dir, date_str)
-    events_path = input_events_path(config.events_dir, date_str)
+    orders_path = input_orders_path(config.ORDERS_DIR, date_str)
+    events_path = input_events_path(config.EVENTS_DIR, date_str)
 
     if not events_path.exists():
         return False, f"{date_str}: events input not found — {events_path}"
     if not orders_path.exists():
         return False, f"{date_str}: orders input not found — {orders_path}"
 
-    # Step 1: Load + normalize events
     events_raw = read_parquet(events_path)
     events_normalized = normalize_events(events_raw)
     write_parquet(
         events_normalized,
         events_out,
-        compression=config.parquet_compression,
-        compression_level=config.parquet_compression_level,
+        compression=config.PARQUET_COMPRESSION,
+        compression_level=config.PARQUET_COMPRESSION_LEVEL,
     )
 
-    # Step 2: Build token_id → event metadata lookup
     token_lookup = build_token_lookup(events_raw)
 
-    # Step 3: Load + normalize trades
     orders = read_parquet(orders_path)
     trades = normalize_trades(orders, token_lookup)
     write_parquet(
         trades,
         trades_out,
-        compression=config.parquet_compression,
-        compression_level=config.parquet_compression_level,
+        compression=config.PARQUET_COMPRESSION,
+        compression_level=config.PARQUET_COMPRESSION_LEVEL,
     )
 
     return True, (

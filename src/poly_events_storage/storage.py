@@ -18,8 +18,7 @@ from poly_events_storage.constants import (
 )
 
 # ── Schema ────────────────────────────────────────────────────────────────────
-# Core columns match the target format in /Volumes/T9/project_polymarket_database/events.
-# Additional columns retain useful event/market metadata without nesting.
+# Normalized one-row-per-market schema with useful event/market metadata.
 
 EVENTS_SCHEMA = pa.schema(
     [

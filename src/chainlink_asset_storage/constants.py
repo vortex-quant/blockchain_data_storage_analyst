@@ -48,7 +48,7 @@ RETRY_BASE_DELAY = 1.0
 
 # ── Storage ───────────────────────────────────────────────────────────────────
 
-OUTPUT_DIR = Path("/Volumes/T9/project_polymarket_database/chainlink_prices")
+OUTPUT_DIR = Path("data")
 PARQUET_COMPRESSION = "zstd"
 PARQUET_COMPRESSION_LEVEL = 6
 WRITE_BATCH_SIZE = 50_000
@@ -57,4 +57,3 @@ REPLACE = False  # overwrite existing files
 # ── SQD Portal ────────────────────────────────────────────────────────────────
 
 SQD_MAX_BLOCKS_PER_REQUEST = 10_000
-SQD_MIN_BLOCKS_PER_REQUEST = 500

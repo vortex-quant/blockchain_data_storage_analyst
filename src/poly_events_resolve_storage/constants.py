@@ -34,9 +34,7 @@ SQD_MAX_BLOCKS_PER_REQUEST = 10_000
 
 # ── Storage ───────────────────────────────────────────────────────────────────
 
-OUTPUT_DIR = Path(
-    "/Volumes/T9/project_polymarket_database/poly_orders_blockchain_db/orders_data"
-)
+OUTPUT_DIR = Path("data")
 PARQUET_COMPRESSION = "zstd"
 PARQUET_COMPRESSION_LEVEL = 6
 REPLACE = False  # overwrite existing files
