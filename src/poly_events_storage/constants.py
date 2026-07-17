@@ -51,6 +51,9 @@ EVENT_TYPE_DURATION_SEC: dict[str, int] = {
 
 # ── Storage ───────────────────────────────────────────────────────────────────
 
-OUTPUT_DIR = Path("data")
+OUTPUT_DIR = Path(
+    "/Volumes/T9/project_polymarket_database/poly_orders_blockchain_db/orders_data"
+)
 PARQUET_COMPRESSION = "zstd"
 PARQUET_COMPRESSION_LEVEL = 6
+REPLACE = False  # overwrite existing files

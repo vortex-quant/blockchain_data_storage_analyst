@@ -4,22 +4,22 @@ For each UTC day, one file is produced:
   polymarket_events_resolve_YYYY_MM_DD.parquet — one row per resolved market
 
 Usage:
-    poly-events-resolve 2026-07-12
     poly-events-resolve --start 2026-07-01 --end 2026-07-31
-    poly-events-resolve 2026-07-12 --output /data --replace
+    poly-events-resolve --start 2026-07-12 --end 2026-07-12
+
+All paths and settings are defined in constants.py.
+Only --start and --end are set via CLI.
 """
 
 from __future__ import annotations
 
-import argparse
 import sys
 import time
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 import niquests
 
-from poly_events_resolve_storage.constants import OUTPUT_DIR
+from poly_events_resolve_storage.constants import OUTPUT_DIR, REPLACE
 from poly_events_resolve_storage.sqd_portal import fetch_events, resolve_block_range
 from poly_events_resolve_storage.storage import write_parquet
 
@@ -36,24 +36,19 @@ def daterange(start: str, end: str) -> list[str]:
     return dates
 
 
-def run_for_day(
-    client: niquests.Session,
-    date_str: str,
-    output_dir: Path,
-    replace: bool = False,
-) -> bool:
+def run_for_day(client: niquests.Session, date_str: str) -> bool:
     """Fetch and save all UMA event resolutions for a single UTC day."""
     print(f"\n{'=' * 60}")
     print(f"  {date_str} — polymarket_events_resolve")
     print(f"{'=' * 60}")
 
-    output_dir.mkdir(parents=True, exist_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     filename = f"polymarket_events_resolve_{date_str.replace('-', '_')}.parquet"
-    final_path = output_dir / filename
-    temp_path = output_dir / f".tmp_{filename}"
+    final_path = OUTPUT_DIR / filename
+    temp_path = OUTPUT_DIR / f".tmp_{filename}"
 
-    if final_path.exists() and not replace:
-        print(f"  Already exists: {final_path} (use --replace to overwrite)")
+    if final_path.exists() and not REPLACE:
+        print(f"  Already exists: {final_path}")
         return True
 
     if temp_path.exists():
@@ -83,46 +78,25 @@ def run_for_day(
 
 
 def main() -> None:
+    import argparse
+
     parser = argparse.ArgumentParser(
         prog="poly-events-resolve",
         description="Fetch Polymarket event resolutions from UMA oracle on Polygon.",
     )
     parser.add_argument(
-        "date",
-        nargs="?",
-        default=None,
-        help="Single date in YYYY-MM-DD format",
+        "--start", type=str, required=True, help="Start date (YYYY-MM-DD, inclusive)"
     )
     parser.add_argument(
-        "--start", type=str, default=None, help="Start date (YYYY-MM-DD)"
-    )
-    parser.add_argument(
-        "--end", type=str, default=None, help="End date (YYYY-MM-DD, inclusive)"
-    )
-    parser.add_argument(
-        "--output",
-        type=str,
-        default=None,
-        help=f"Output directory (default: {OUTPUT_DIR})",
-    )
-    parser.add_argument(
-        "--replace", action="store_true", help="Overwrite existing files"
+        "--end", type=str, required=True, help="End date (YYYY-MM-DD, inclusive)"
     )
     args = parser.parse_args()
 
-    if args.start and args.end:
-        dates = daterange(args.start, args.end)
-    elif args.date:
-        dates = [args.date]
-    else:
-        parser.error("Provide a date argument or --start/--end for a range")
-
-    output_dir = Path(args.output) if args.output else OUTPUT_DIR
+    dates = daterange(args.start, args.end)
 
     print(f"\n  Dates to fetch: {len(dates)}")
-    print(f"  Output directory: {output_dir}")
-    if len(dates) > 1:
-        print(f"  Range: {dates[0]} to {dates[-1]}")
+    print(f"  Range: {dates[0]} to {dates[-1]}")
+    print(f"  Output: {OUTPUT_DIR}")
 
     success_count = 0
     fail_count = 0
@@ -133,7 +107,7 @@ def main() -> None:
             print(f"  Day {i + 1}/{len(dates)}")
             print(f"{'#' * 60}")
 
-            ok = run_for_day(client, date_str, output_dir, replace=args.replace)
+            ok = run_for_day(client, date_str)
             if ok:
                 success_count += 1
             else:
@@ -141,7 +115,6 @@ def main() -> None:
 
     print(f"\n{'=' * 60}")
     print(f"  Complete: {success_count} succeeded, {fail_count} failed")
-    print(f"  Output: {output_dir}")
     print(f"{'=' * 60}")
 
     if fail_count > 0:

@@ -5,23 +5,27 @@ For each UTC day, one file is produced:
 
 Usage:
     poly-events --start 2026-07-01 --end 2026-07-31
-    poly-events --start 2026-07-09 --end 2026-07-09 --output /data/polymarket
-    poly-events 2026-07-09
+    poly-events --start 2026-07-09 --end 2026-07-09
+
+All paths and settings are defined in constants.py.
+Only --start and --end are set via CLI.
 """
 
 from __future__ import annotations
 
-import argparse
 import sys
 import time
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 import niquests
 
-from poly_events_storage.constants import OUTPUT_DIR
+from poly_events_storage.constants import OUTPUT_DIR, REPLACE
 from poly_events_storage.gamma_api import fetch_crypto_events_for_day
-from poly_events_storage.storage import ensure_output_dir, open_events_writer, write_events_batch
+from poly_events_storage.storage import (
+    ensure_output_dir,
+    open_events_writer,
+    write_events_batch,
+)
 
 
 def daterange(start: str, end: str) -> list[str]:
@@ -36,36 +40,26 @@ def daterange(start: str, end: str) -> list[str]:
     return dates
 
 
-def run_for_day(
-    client: niquests.Session,
-    date_str: str,
-    output_dir: Path,
-    replace: bool = False,
-) -> bool:
-    """Fetch and save all crypto events for a single UTC day.
-
-    Returns True on success, False on failure.
-    """
+def run_for_day(client: niquests.Session, date_str: str) -> bool:
+    """Fetch and save all crypto events for a single UTC day."""
     print(f"\n{'=' * 60}")
     print(f"  {date_str} — polymarket_events via Gamma API")
     print(f"{'=' * 60}")
 
-    out_dir = ensure_output_dir(output_dir)
+    out_dir = ensure_output_dir(OUTPUT_DIR)
     filename = f"polymarket_events_{date_str.replace('-', '_')}.parquet"
     final_path = out_dir / filename
     temp_path = out_dir / f".tmp_{filename}"
 
-    if final_path.exists() and not replace:
-        print(f"  Already exists: {final_path} (use --replace to overwrite)")
+    if final_path.exists() and not REPLACE:
+        print(f"  Already exists: {final_path}")
         return True
 
     if temp_path.exists():
-        print(f"  Cleaning up incomplete temp file from previous run")
         temp_path.unlink()
 
     try:
-        # Step 1: Fetch all crypto events for the UTC day
-        print(f"\n--- Step 1: Fetching crypto events from Gamma API ---")
+        print("\n--- Fetching crypto events from Gamma API ---")
         t0 = time.time()
         events, failures = fetch_crypto_events_for_day(client, date_str)
         print(f"  Fetched {len(events)} events in {time.time() - t0:.1f}s")
@@ -74,8 +68,6 @@ def run_for_day(
             for f in failures:
                 print(f"  WARNING: {f}")
 
-        # Step 2: Write to parquet
-        print(f"\n--- Step 2: Writing parquet ---")
         writer = open_events_writer(temp_path)
         total_rows = 0
         try:
@@ -86,7 +78,6 @@ def run_for_day(
 
         print(f"  Wrote {total_rows} rows ({len(events)} events)")
 
-        # Step 3: Atomic rename
         if not events:
             print(f"  No crypto events found for {date_str}")
 
@@ -98,6 +89,7 @@ def run_for_day(
     except Exception as exc:
         print(f"\n  ERROR for {date_str}: {exc}")
         import traceback
+
         traceback.print_exc()
         if temp_path.exists():
             temp_path.unlink()
@@ -105,35 +97,25 @@ def run_for_day(
 
 
 def main() -> None:
+    import argparse
+
     parser = argparse.ArgumentParser(
         prog="poly-events",
         description="Fetch Polymarket crypto event metadata from Gamma API.",
     )
     parser.add_argument(
-        "date",
-        nargs="?",
-        default=None,
-        help="Single date in YYYY-MM-DD format",
+        "--start", type=str, required=True, help="Start date (YYYY-MM-DD, inclusive)"
     )
-    parser.add_argument("--start", type=str, default=None, help="Start date (YYYY-MM-DD)")
-    parser.add_argument("--end", type=str, default=None, help="End date (YYYY-MM-DD, inclusive)")
-    parser.add_argument("--output", type=str, default=None, help=f"Output directory (default: {OUTPUT_DIR})")
-    parser.add_argument("--replace", action="store_true", help="Overwrite existing files")
+    parser.add_argument(
+        "--end", type=str, required=True, help="End date (YYYY-MM-DD, inclusive)"
+    )
     args = parser.parse_args()
 
-    if args.start and args.end:
-        dates = daterange(args.start, args.end)
-    elif args.date:
-        dates = [args.date]
-    else:
-        parser.error("Provide --start and --end (or a single date argument)")
-
-    output_dir = Path(args.output) if args.output else OUTPUT_DIR
+    dates = daterange(args.start, args.end)
 
     print(f"\n  Dates to fetch: {len(dates)}")
-    print(f"  Output directory: {output_dir}")
-    if len(dates) > 1:
-        print(f"  Range: {dates[0]} to {dates[-1]}")
+    print(f"  Range: {dates[0]} to {dates[-1]}")
+    print(f"  Output: {OUTPUT_DIR}")
 
     success_count = 0
     fail_count = 0
@@ -144,7 +126,7 @@ def main() -> None:
             print(f"  Day {i + 1}/{len(dates)}")
             print(f"{'#' * 60}")
 
-            ok = run_for_day(client, date_str, output_dir, replace=args.replace)
+            ok = run_for_day(client, date_str)
             if ok:
                 success_count += 1
             else:
@@ -152,7 +134,6 @@ def main() -> None:
 
     print(f"\n{'=' * 60}")
     print(f"  Complete: {success_count} succeeded, {fail_count} failed")
-    print(f"  Output: {output_dir}")
     print(f"{'=' * 60}")
 
     if fail_count > 0:
