@@ -59,7 +59,7 @@ All paths and settings are configured in each package's `constants.py` / `config
 
 ```bash
 # Fetch order fills for a date range
-uv run poly-fetch --start 2026-07-01 --end 2026-07-31
+uv run poly-fetch --start 2026-10-07 --end 2026-10-08
 
 # Fetch events for a single day
 uv run poly-events --start 2026-07-09 --end 2026-07-09

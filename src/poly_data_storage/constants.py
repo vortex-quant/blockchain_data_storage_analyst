@@ -33,9 +33,11 @@ ORDER_FILLED_TOPIC = (
 
 # ── Timing constants ──────────────────────────────────────────────────────────
 
-SQD_DELAY = 0.55  # conservative pacing between successful stream requests
-MAX_RETRIES = 5
+SQD_DELAY = 0.55  # pacing after successful stream responses; not added to retries
+MAX_RETRIES = 5  # malformed responses and transport failures without progress
 RETRY_BASE_DELAY = 1.0
+RETRY_MAX_DELAY = 30.0  # fallback only; never caps a valid Retry-After
+SERVICE_RETRY_TIMEOUT = 15 * 60.0  # seconds without validated block progress
 
 # ── Storage ───────────────────────────────────────────────────────────────────
 

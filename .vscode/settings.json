@@ -1,10 +1,22 @@
 {
-  // Point VS Code directly to the uv-generated virtual environment
-  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
-  "python.terminal.activateEnvInTerminal": true,
-  "python.workspaceSearchPaths": ["${workspaceFolder}/.venv"],
+  // Use this project's uv-managed environment. VS Code accepts the .venv
+  // directory here and resolves the platform-specific interpreter itself.
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv",
+  "python.terminal.activateEnvironment": true,
+  "python-envs.workspaceSearchPaths": ["./.venv"],
 
-  // Force VS Code to use the official Ruff extension for linting and formatting
+  // Let the Astral ty extension provide Python language services in this workspace.
+  "python.languageServer": "None",
+  "ty.importStrategy": "fromEnvironment",
+  "ty.path": [
+    "${workspaceFolder}/.venv/bin/ty",
+    "${workspaceFolder}/.venv/Scripts/ty.exe"
+  ],
+
+  // This repository uses a src/ package layout.
+  "python.analysis.extraPaths": ["${workspaceFolder}/src"],
+
+  // Ruff owns formatting, lint fixes, and import sorting for Python files.
   "[python]": {
     "editor.defaultFormatter": "charliermarsh.ruff",
     "editor.formatOnSave": true,
@@ -13,23 +25,16 @@
       "source.organizeImports.ruff": "explicit"
     }
   },
-  // 3. Configure testing to point directly to the uv environment's pytest
+
+  // Use pytest from the selected project interpreter.
   "python.testing.pytestEnabled": true,
   "python.testing.unittestEnabled": false,
-  "python.testing.pytestArgs": [
-    "tests"
-  ],
-  "python.analysis.diagnosticSeverityOverrides": {
-    "reportMissingModuleSource": "none"
-  },
-  // 4. Hide temporary git/uv artifacts from your file explorer to keep it clean
-  "files.exclude": {
-    // "**/.pytest_cache": true,
-    "**/__pycache__": true,
-    "**.egg-info": true,
-    // "**/.ruff_cache": true,
-    "**/.venv": true,
-    // "**/uv.lock": true
-  }
+  "python.testing.pytestArgs": ["tests"],
 
+  // Hide generated files in the Explorer without excluding source from analysis.
+  "files.exclude": {
+    "**/__pycache__": true,
+    "**/*.egg-info": true,
+    "**/.venv": true
+  }
 }

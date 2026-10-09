@@ -1,12 +1,12 @@
 [project]
 name = "blockchain-data-storage-analyst"
-version = "3.1.0"
+version = "3.2.0"
 requires-python = ">=3.14.8"
 dependencies = [
     "niquests>=3.20.1",
     "orjson>=3.11.9",
     "polars>=1.42.1",
-    "pyarrow>=25.0.0",
+    "pyarrow>=26.0.0",
 ]
 
 [project.scripts]
@@ -28,6 +28,7 @@ python-preference = "only-managed"
 
 [dependency-groups]
 dev = [
+    "pytest>=9.1.1",
     "ruff>=0.16.10",
     "ty>=0.0.85",
 ]

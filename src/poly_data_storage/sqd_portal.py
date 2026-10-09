@@ -6,8 +6,9 @@ import time
 from collections.abc import Generator
 from contextlib import closing
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
+from math import ceil, isfinite, log2
 from typing import Any
 
 import niquests
@@ -20,6 +21,8 @@ from poly_data_storage.constants import (
     ORDER_FILLED_TOPIC,
     ORDER_FILLED_V1_TOPIC,
     RETRY_BASE_DELAY,
+    RETRY_MAX_DELAY,
+    SERVICE_RETRY_TIMEOUT,
     SQD_DELAY,
     SQD_URL,
     WRITE_BATCH_SIZE,
@@ -27,6 +30,7 @@ from poly_data_storage.constants import (
 from poly_data_storage.logger import get_logger
 
 log = get_logger()
+EST = timezone(timedelta(hours=-5), "EST")
 LOG_FILTERS = [
     {
         "address": [a for a, v in EXCHANGES.items() if v == "v1"],
@@ -44,9 +48,16 @@ class DayNotReady(RuntimeError):
 
 
 class RetryablePortalError(RuntimeError):
-    def __init__(self, message: str, retry_after: str | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        retry_after: str | None = None,
+        *,
+        service_error: bool = False,
+    ) -> None:
         super().__init__(message)
         self.retry_after = retry_after
+        self.service_error = service_error
 
 
 def _check_response(resp: niquests.Response) -> None:
@@ -67,34 +78,83 @@ def _check_response(resp: niquests.Response) -> None:
     if error.get("type") in {"rate_limit_error", "availability_error"} or (
         not error.get("type") and resp.status_code in {429, 502, 503, 504, 529}
     ):
-        raise RetryablePortalError(message, resp.headers.get("Retry-After"))
+        raise RetryablePortalError(
+            message, resp.headers.get("Retry-After"), service_error=True
+        )
     raise RuntimeError(message)
 
 
-def _retry(exc: Exception, failures: int) -> None:
-    """MAX_RETRIES retries after the initial attempt, without unbounded resets."""
-    if failures > MAX_RETRIES:
-        raise exc
-    delay = RETRY_BASE_DELAY * 2 ** (failures - 1)
-    retry_after = getattr(exc, "retry_after", None)
+def _retry_delay(retry_after: str | None, failures: int) -> float:
+    """Use the server interval directly; cap only our fallback backoff."""
     if retry_after:
         try:
-            delay = max(delay, float(retry_after))
+            delay = float(retry_after)
         except ValueError:
             try:
                 when = parsedate_to_datetime(retry_after)
-                delay = max(delay, (when - datetime.now(UTC)).total_seconds())
+                delay = max(0.0, (when - datetime.now(UTC)).total_seconds())
             except TypeError, ValueError, OverflowError:
-                pass
-    log.warning("  SQD retry %s/%s after %.1fs: %s", failures, MAX_RETRIES, delay, exc)
-    time.sleep(delay)
+                delay = -1.0
+        if isfinite(delay) and delay >= 0:
+            return delay
+    # Limit the exponent as well, even after many server-directed retries.
+    exponent = min(failures - 1, max(0, ceil(log2(RETRY_MAX_DELAY / RETRY_BASE_DELAY))))
+    return min(RETRY_MAX_DELAY, RETRY_BASE_DELAY * 2**exponent)
+
+
+class _RetryState:
+    """Separate service capacity waits from bounded response/transport retries."""
+
+    def __init__(self) -> None:
+        self.progress()
+
+    def progress(self) -> None:
+        self.failures = self.service_failures = 0
+        self.last_progress = time.monotonic()
+
+    def wait(self, exc: Exception) -> None:
+        service = isinstance(exc, RetryablePortalError) and exc.service_error
+        if service:
+            self.service_failures += 1
+            failures = self.service_failures
+            remaining = SERVICE_RETRY_TIMEOUT - (time.monotonic() - self.last_progress)
+            if remaining <= 0:
+                raise TimeoutError(
+                    "SQD service retry budget exhausted without progress"
+                ) from exc
+        else:
+            self.failures += 1
+            failures = self.failures
+            if failures > MAX_RETRIES:
+                raise exc
+        delay = _retry_delay(getattr(exc, "retry_after", None), failures)
+        if service:
+            log.warning(
+                "  SQD service retry %s after %.1fs (%.1fs budget remaining): %s",
+                failures,
+                delay,
+                remaining,
+                exc,
+            )
+            # If Retry-After exceeds our remaining budget, wait out the budget
+            # and fail. Never issue an early retry by shortening the header.
+            time.sleep(min(delay, remaining))
+            if time.monotonic() - self.last_progress >= SERVICE_RETRY_TIMEOUT:
+                raise TimeoutError(
+                    "SQD service retry budget exhausted without progress"
+                ) from exc
+        else:
+            log.warning(
+                "  SQD retry %s/%s after %.1fs: %s", failures, MAX_RETRIES, delay, exc
+            )
+            time.sleep(delay)
 
 
 def get_json(
     client: niquests.Session, url: str, *, timestamp_lookup: bool = False
 ) -> Any:
     """Read a small SQD JSON endpoint with the same retry/error policy."""
-    failures = 0
+    retries = _RetryState()
     while True:
         resp = None
         try:
@@ -107,14 +167,19 @@ def get_json(
             except ValueError as exc:
                 raise RetryablePortalError("Malformed SQD JSON response") from exc
         except (niquests.exceptions.RequestException, RetryablePortalError) as exc:
-            failures += 1
             # Close before waiting, including on overloaded streamed responses.
             if resp is not None:
                 resp.close()
-            _retry(exc, failures)
+            retries.wait(exc)
         finally:
             if resp is not None:
                 resp.close()
+
+
+def _format_block_time(timestamp: int) -> str:
+    """Show the header time in UTC and fixed EST, including both dates."""
+    utc = datetime.fromtimestamp(timestamp, tz=UTC)
+    return f"{utc:%d_%m_%Y %H:%M:%S} UTC {utc.astimezone(EST):%d_%m_%Y %H:%M:%S} EST"
 
 
 def stream_blocks(
@@ -133,9 +198,10 @@ def stream_blocks(
     if start_block < 0 or end_block < start_block - 1:
         raise ValueError("Invalid inclusive block range")
     current = start_block
-    failures = 0
+    retries = _RetryState()
     while current <= end_block:
         request_start = current
+        first_timestamp = last_timestamp = 0
         fields: dict[str, Any] = {
             "block": {"number": True, "timestamp": True, "hash": True}
         }
@@ -184,18 +250,27 @@ def stream_blocks(
                 if not isinstance(obj.get("logs", []), list):
                     raise RetryablePortalError(f"Invalid logs at block {number}")
                 yield obj
+                if number == request_start:
+                    first_timestamp = timestamp
+                last_timestamp = timestamp
                 current = number + 1
-                failures = 0
+                retries.progress()
             if current == request_start:
                 raise RetryablePortalError(
                     f"Empty response before block {current} was scanned"
                 )
-            log.info("  Processed blocks %s-%s", request_start, current - 1)
+            log.info(
+                "  Processed blocks %s-%s (%s) - (%s)",
+                request_start,
+                current - 1,
+                _format_block_time(first_timestamp),
+                _format_block_time(last_timestamp),
+            )
         except (niquests.exceptions.RequestException, RetryablePortalError) as exc:
-            failures += 1
             if resp is not None:
                 resp.close()
-            _retry(exc, failures)
+            retries.wait(exc)
+            continue
         finally:
             if resp is not None:
                 resp.close()

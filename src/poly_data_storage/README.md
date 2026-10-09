@@ -36,6 +36,9 @@ catalog/analysis application to identify the additional dates to fetch.
 
 ## Meaning of the preserved columns
 
+See [the analyst data dictionary](DATA_DICTIONARY.md) for all 15 columns, units,
+row identity, examples, and aggregation guidance.
+
 - Every distinct fill log is retained, including taker aggregate fills.
   `is_taker` means the event's taker equals its emitting exchange. Maker and taker
   aggregate amounts must not simply be summed together as independent volume.
@@ -69,7 +72,22 @@ fails or is not ready.
 complete block, including header-only responses. Stream failures resume at the
 first unprocessed block. Malformed records are never silently discarded. HTTP
 success does not reset the failure budget; validated block progress does.
-Retries honour `Retry-After` with bounded backoff.
+Service overload/unavailability retries use a 15-minute no-progress budget
+(`SERVICE_RETRY_TIMEOUT`), including request time and waits. Validated block
+progress resets the budget. Metadata requests use the same policy, with a fresh
+budget per lookup. An in-flight request may finish after the budget expires.
+Malformed responses and transport failures retain `MAX_RETRIES=5` without
+progress; permanent request/decoding errors fail immediately.
+
+A valid `Retry-After` is used directly, even when it exceeds the 30-second
+fallback cap. Without a usable header, backoff is 1, 2, 4, 8, 16, then 30 seconds.
+If the server interval exceeds the remaining budget, the collector waits out the
+budget and fails without issuing an early retry. Successful stream continuations
+retain `SQD_DELAY=0.55`; that pause is not added after a retry has already waited.
+
+Processed-range logs show the first and last processed block header timestamps
+in UTC and fixed EST (UTC-05:00), with a date for each timezone. EST here does not
+switch to EDT in summer. The log-line prefix remains the logger's system time.
 
 A file is published only after block, log, and written-row counts reconcile.
 Completion details are stored in its Parquet footer, without adding columns.

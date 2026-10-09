@@ -13,3 +13,4 @@ dataset
 docs
 logs
 *.parquet
+data

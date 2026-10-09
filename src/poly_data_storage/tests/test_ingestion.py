@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
@@ -94,11 +94,31 @@ def response(
     return resp
 
 
+def service_response(*, status: int = 529, retry_after: str | None = "10") -> MagicMock:
+    resp = response(status=status)
+    if retry_after is not None:
+        resp.headers = {"Retry-After": retry_after}
+    resp.json.return_value = {
+        "error": {"type": "rate_limit_error" if status == 529 else "availability_error"}
+    }
+    return resp
+
+
 class IngestionTests(unittest.TestCase):
     def setUp(self) -> None:
-        sleeper = patch("poly_data_storage.sqd_portal.time.sleep")
-        sleeper.start()
+        self.now = 0.0
+
+        def advance(seconds: float) -> None:
+            self.now += seconds
+
+        sleeper = patch("poly_data_storage.sqd_portal.time.sleep", side_effect=advance)
+        self.sleep = sleeper.start()
         self.addCleanup(sleeper.stop)
+        clock = patch(
+            "poly_data_storage.sqd_portal.time.monotonic", side_effect=lambda: self.now
+        )
+        clock.start()
+        self.addCleanup(clock.stop)
         for target in ("poly_data_storage.sqd_portal.log", "poly_data_storage.cli.log"):
             logger = patch(target)
             logger.start()
@@ -228,6 +248,132 @@ class IngestionTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.collect(0, 0)
         self.assertEqual(self.client.post.call_count, 1)
+
+    def test_repeated_overload_recovers_without_duplicates_or_extra_retry_pause(
+        self,
+    ) -> None:
+        busy = service_response()
+        self.client.post.side_effect = [
+            *[busy] * 8,
+            response([block(0, logs=[event(self.address)])]),
+            *[busy] * 8,
+            response([block(1, logs=[event(self.address)])]),
+        ]
+        self.assertEqual([r["block_number"] for r in self.collect(0, 1)], [0, 1])
+        self.assertEqual(
+            [c.kwargs["json"]["fromBlock"] for c in self.client.post.call_args_list],
+            [0] * 9 + [1] * 9,
+        )
+        self.assertEqual(
+            self.sleep.call_args_list,
+            [call(10.0)] * 8 + [call(sqd_portal.SQD_DELAY)] + [call(10.0)] * 8,
+        )
+
+    def test_metadata_overload_recovers_and_malformed_json_remains_bounded(
+        self,
+    ) -> None:
+        result = response()
+        result.json.return_value = {"number": 123}
+        self.client.get.side_effect = [*[service_response(status=503)] * 8, result]
+        self.assertEqual(sqd_portal.get_json(self.client, "head"), {"number": 123})
+        self.assertEqual(self.client.get.call_count, 9)
+        self.client.get.reset_mock()
+        broken = response()
+        broken.json.side_effect = ValueError("invalid JSON")
+        self.client.get.side_effect = None
+        self.client.get.return_value = broken
+        with self.assertRaises(sqd_portal.RetryablePortalError):
+            sqd_portal.get_json(self.client, "head")
+        self.assertEqual(self.client.get.call_count, MAX_RETRIES + 1)
+
+    def test_service_budget_resets_on_validated_block_progress(self) -> None:
+        busy = service_response()
+        self.client.post.side_effect = [
+            busy,
+            busy,
+            response([block(0)]),
+            busy,
+            busy,
+            response([block(1)]),
+        ]
+        with patch.object(sqd_portal, "SERVICE_RETRY_TIMEOUT", 25.0):
+            self.assertEqual(self.collect(0, 1), [])
+        self.assertGreater(self.now, 25.0)
+
+    def test_service_errors_do_not_consume_or_reset_malformed_response_retries(
+        self,
+    ) -> None:
+        busy = service_response()
+        broken = response([b"{}"])
+        self.client.post.side_effect = [*[busy] * 8, broken, response([block(0)])]
+        self.assertEqual(self.collect(0, 0), [])
+        self.assertEqual(self.client.post.call_count, 10)
+        self.client.post.reset_mock()
+        self.client.post.side_effect = [broken, busy] * MAX_RETRIES + [broken]
+        with self.assertRaises(sqd_portal.RetryablePortalError):
+            self.collect(0, 0)
+        self.assertEqual(self.client.post.call_count, 2 * MAX_RETRIES + 1)
+
+    def test_service_timeout_includes_requests_and_does_not_reset_on_http_200(
+        self,
+    ) -> None:
+        busy = service_response()
+        self.client.post.side_effect = [busy, busy, response([b"{}"]), busy]
+        with (
+            patch.object(sqd_portal, "SERVICE_RETRY_TIMEOUT", 25.0),
+            self.assertRaisesRegex(TimeoutError, "without progress"),
+        ):
+            self.collect(0, 0)
+        self.assertEqual(self.now, 25.0)
+        self.assertEqual(self.client.post.call_count, 4)
+        # HTTP request latency also consumes the budget, before any retry sleep.
+        self.client.get.side_effect = None
+
+        def unavailable(*args, **kwargs):
+            self.now += 30.0
+            return busy
+
+        self.client.get.side_effect = unavailable
+        self.sleep.reset_mock()
+        with (
+            patch.object(sqd_portal, "SERVICE_RETRY_TIMEOUT", 25.0),
+            self.assertRaises(TimeoutError),
+        ):
+            sqd_portal.get_json(self.client, "head")
+        self.sleep.assert_not_called()
+        self.assertEqual(self.client.get.call_count, 1)
+
+    def test_server_wait_is_not_capped_or_retried_before_budget_expires(self) -> None:
+        self.client.post.side_effect = [
+            service_response(retry_after="120"),
+            response([block(0)]),
+        ]
+        self.assertEqual(self.collect(0, 0), [])
+        self.assertEqual(self.sleep.call_args_list, [call(120.0)])
+        self.client.get.return_value = service_response(retry_after="120")
+        self.sleep.reset_mock()
+        with (
+            patch.object(sqd_portal, "SERVICE_RETRY_TIMEOUT", 25.0),
+            self.assertRaises(TimeoutError),
+        ):
+            sqd_portal.get_json(self.client, "head")
+        self.sleep.assert_called_once_with(25.0)
+        self.assertEqual(self.client.get.call_count, 1)
+
+    def test_fallback_is_capped_and_invalid_retry_headers_are_ignored(self) -> None:
+        self.assertEqual(
+            [sqd_portal._retry_delay(None, i) for i in range(1, 9)],
+            [1.0, 2.0, 4.0, 8.0, 16.0, 30.0, 30.0, 30.0],
+        )
+        for value in ("bad", "-1", "nan", "inf", ""):
+            with self.subTest(value=value):
+                self.assertEqual(sqd_portal._retry_delay(value, 10000), 30.0)
+        self.assertEqual(sqd_portal._retry_delay("10", 10000), 10.0)
+        now = datetime(2026, 10, 9, tzinfo=UTC)
+        header = (now + timedelta(seconds=120)).strftime("%a, %d %b %Y %H:%M:%S GMT")
+        with patch.object(sqd_portal, "datetime") as clock:
+            clock.now.return_value = now
+            self.assertEqual(sqd_portal._retry_delay(header, 10000), 120.0)
 
     def test_exact_midnights_cached_and_unfinalized_day_rejected(self) -> None:
         start = int(datetime(2026, 7, 9, tzinfo=UTC).timestamp())
@@ -361,6 +507,23 @@ class IngestionTests(unittest.TestCase):
                 self.assertFalse(cli.run_for_day(self.client, "2026-07-09"))
             self.assertEqual(path.read_bytes(), original)
             self.assertEqual(list(Path(directory).glob(".tmp_*")), [])
+            self.client.post.side_effect = [
+                response([block(0, logs=[event(self.address)])]),
+                *[service_response()] * 3,
+            ]
+            with (
+                patch.object(cli, "REPLACE", True),
+                patch.object(sqd_portal, "SERVICE_RETRY_TIMEOUT", 25.0),
+                patch.object(
+                    cli,
+                    "stream_decoded_logs",
+                    partial(sqd_portal.stream_decoded_logs, batch_size=1),
+                ),
+            ):
+                self.assertFalse(cli.run_for_day(self.client, "2026-07-09"))
+            self.assertEqual(path.read_bytes(), original)
+            self.assertEqual(list(Path(directory).glob(".tmp_*")), [])
+            self.client.post.side_effect = None
             self.client.post.return_value = response([block(0), block(1)])
             self.assertTrue(cli.run_for_day(self.client, "2026-07-12"))
             empty = Path(directory) / "polymarket_orders_2026_07_12.parquet"
