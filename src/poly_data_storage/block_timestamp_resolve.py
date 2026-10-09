@@ -1,66 +1,99 @@
-"""Block range resolution via SQD Portal timestamp endpoint."""
+"""Exact UTC boundaries verified against finalized SQD block headers."""
 
 from __future__ import annotations
 
-import time
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import niquests
 
-from poly_data_storage.constants import (
-    MAX_RETRIES,
-    RETRY_BASE_DELAY,
-    SQD_TIMESTAMP_URL,
-)
+from poly_data_storage.constants import SQD_FINALIZED_HEAD_URL, SQD_TIMESTAMP_URL
 from poly_data_storage.logger import get_logger
+from poly_data_storage.sqd_portal import DayNotReady, get_json, stream_blocks
 
 log = get_logger()
+BoundaryCache = dict[int, tuple[int, str]]
 
 
 def _sqd_timestamp_to_block(client: niquests.Session, target_ts: int) -> int:
-    """Resolve a Unix timestamp to an exact block number via SQD Portal.
+    result = get_json(
+        client, SQD_TIMESTAMP_URL.format(ts=target_ts), timestamp_lookup=True
+    )
+    number = result.get("block_number") if isinstance(result, dict) else None
+    if type(number) is not int or number < 0:
+        raise ValueError("SQD timestamp lookup returned an invalid block number")
+    return number
 
-    SQD Portal indexes full Polygon history from genesis to head.
-    Returns the block number whose timestamp is at or after target_ts.
-    """
-    url = SQD_TIMESTAMP_URL.format(ts=target_ts)
-    for attempt in range(MAX_RETRIES):
-        try:
-            resp = client.get(url, timeout=30.0)
-            if resp.status_code == 404:
-                raise ValueError(f"No block found at or after timestamp {target_ts}")
-            resp.raise_for_status()
-            return resp.json()["block_number"]
-        except Exception as exc:
-            if attempt < MAX_RETRIES - 1:
-                delay = RETRY_BASE_DELAY * (2**attempt)
-                log.info(
-                    f"  SQD timestamp lookup retry {attempt + 1}/{MAX_RETRIES} after {delay}s: {exc}"
-                )
-                time.sleep(delay)
-            else:
-                raise
+
+def _verify_boundary(client: niquests.Session, target_ts: int, number: int) -> str:
+    blocks = list(stream_blocks(client, max(0, number - 1), number, include_logs=False))
+    header = blocks[-1]["header"]
+    if header["timestamp"] < target_ts or (
+        number > 0 and blocks[0]["header"]["timestamp"] >= target_ts
+    ):
+        raise ValueError(
+            f"SQD block {number} is not the first block at or after {target_ts}"
+        )
+    block_hash = header.get("hash")
+    if not isinstance(block_hash, str) or len(block_hash) != 66:
+        raise ValueError(f"Missing block hash for verified boundary {number}")
+    return block_hash
 
 
 def resolve_block_range(
     client: niquests.Session,
     date_str: str,
+    *,
+    boundary_cache: BoundaryCache | None = None,
+    evidence: dict[str, Any] | None = None,
 ) -> tuple[int, int, int, int]:
-    """Resolve block range covering a UTC day via SQD Portal timestamp endpoint.
+    """Return inclusive scan bounds and a half-open UTC timestamp interval.
 
-    Returns (start_block, end_block, day_start_ts, day_end_ts).
+    The next day's boundary itself must be finalized before publishing a day.
+    Equal boundary numbers mean an exact empty day, not an estimated range.
     """
-    day_start_dt = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=UTC)
-    day_end_dt = day_start_dt + timedelta(days=1)
-    day_start_ts = int(day_start_dt.timestamp())
-    day_end_ts = int(day_end_dt.timestamp())
-
-    log.info("  Resolving block range via SQD Portal timestamp endpoint...")
-    start_block = _sqd_timestamp_to_block(client, day_start_ts)
-    end_block = _sqd_timestamp_to_block(client, day_end_ts)
-    log.info(f"  UTC day: {day_start_dt.isoformat()} -> {day_end_dt.isoformat()}")
-    log.info(
-        f"  Block range: {start_block} to {end_block} ({end_block - start_block} blocks)"
+    day_start = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=UTC)
+    day_end = day_start + timedelta(days=1)
+    if day_end > datetime.now(UTC):
+        raise DayNotReady(f"UTC day {date_str} has not ended yet")
+    start_ts, end_ts = int(day_start.timestamp()), int(day_end.timestamp())
+    cache = boundary_cache if boundary_cache is not None else {}
+    start_block = (
+        cache[start_ts][0]
+        if start_ts in cache
+        else _sqd_timestamp_to_block(client, start_ts)
     )
-
-    return start_block, end_block, day_start_ts, day_end_ts
+    next_block = (
+        cache[end_ts][0] if end_ts in cache else _sqd_timestamp_to_block(client, end_ts)
+    )
+    if next_block < start_block:
+        raise ValueError("SQD returned reversed daily block boundaries")
+    head = get_json(client, SQD_FINALIZED_HEAD_URL)
+    if not isinstance(head, dict) or type(head.get("number")) is not int:
+        raise DayNotReady("SQD has no finalized head available")
+    if next_block > head["number"]:
+        raise DayNotReady(
+            f"Boundary block {next_block} is beyond finalized head {head['number']}"
+        )
+    for ts, number in ((start_ts, start_block), (end_ts, next_block)):
+        if ts not in cache:
+            cache[ts] = number, _verify_boundary(client, ts, number)
+    if evidence is not None:
+        evidence.update(
+            day_start_ts=start_ts,
+            day_end_ts=end_ts,
+            start_block=start_block,
+            end_block=next_block - 1,
+            next_day_block=next_block,
+            start_block_hash=cache[start_ts][1],
+            next_day_block_hash=cache[end_ts][1],
+            finalized_head=head["number"],
+            finalized_head_hash=head.get("hash"),
+        )
+    log.info(
+        "  Verified UTC day %s: finalized blocks %s-%s",
+        date_str,
+        start_block,
+        next_block - 1,
+    )
+    return start_block, next_block - 1, start_ts, end_ts

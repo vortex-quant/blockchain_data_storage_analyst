@@ -4,36 +4,30 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from uuid import uuid4
 
 _LOG_DIR = Path(__file__).resolve().parent.parent.parent / "logs"
-_logger: logging.Logger | None = None
-
-
-def _next_log_file() -> Path:
-    """Find the next available poly_fetch_<n>.log filename."""
-    n = 1
-    while True:
-        candidate = _LOG_DIR / f"poly_fetch_{n}.log"
-        if not candidate.exists():
-            return candidate
-        n += 1
 
 
 def get_logger() -> logging.Logger:
-    """Return a logger that writes to both stdout and a per-run log file."""
-    global _logger
-    if _logger is not None:
-        return _logger
+    """Return the shared logger without filesystem effects on import."""
+    return logging.getLogger("poly_fetch")
+
+
+def configure_logger() -> None:
+    """Configure console and per-run file logging when the CLI starts."""
+    logger = get_logger()
+    if logger.handlers:
+        return
 
     _LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-    log_file = _next_log_file()
+    log_file = _LOG_DIR / f"poly_fetch_{uuid4().hex}.log"
 
-    logger = logging.getLogger("poly_fetch")
     logger.setLevel(logging.INFO)
     logger.propagate = False
 
-    fmt = logging.Formatter("%(message)s")
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
 
     console = logging.StreamHandler()
     console.setFormatter(fmt)
@@ -42,6 +36,3 @@ def get_logger() -> logging.Logger:
     file_handler = logging.FileHandler(log_file, encoding="utf-8")
     file_handler.setFormatter(fmt)
     logger.addHandler(file_handler)
-
-    _logger = logger
-    return logger
